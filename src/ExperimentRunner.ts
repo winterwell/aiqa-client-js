@@ -51,7 +51,7 @@ export class ExperimentRunner {
 	constructor(options: ExperimentRunnerOptions) {
 		this.datasetId = options.datasetId;
 		this.experimentId = options.experimentId;
-		this.serverUrl = (options.serverUrl || process.env.AIQA_SERVER_URL).replace(/\/$/, '');
+		this.serverUrl = (options.serverUrl || process.env.AIQA_SERVER_URL || 'https://server-aiqa.winterwell.com').replace(/\/$/, '');
 		this.apiKey = options.apiKey || process.env.AIQA_API_KEY || '';
 		this.organisation = options.organisationId;
 	}
@@ -64,6 +64,7 @@ export class ExperimentRunner {
 			method: 'GET',
 			headers: {
 				'Content-Type': 'application/json',
+				'Accept-Encoding': 'gzip, deflate, br', // Request compression (fetch handles decompression automatically)
 				'Authorization': `ApiKey ${this.apiKey}`
 			},
 		});
@@ -92,6 +93,7 @@ export class ExperimentRunner {
 			method: 'GET',
 			headers: {
 				'Content-Type': 'application/json',
+				'Accept-Encoding': 'gzip, deflate, br', // Request compression (fetch handles decompression automatically)
 				'Authorization': `ApiKey ${this.apiKey}`
 			}
 		},
@@ -134,6 +136,7 @@ export class ExperimentRunner {
 			method: 'POST',
 			headers: {
 				'Content-Type': 'application/json',
+				'Accept-Encoding': 'gzip, deflate, br', // Request compression (fetch handles decompression automatically)
 				'Authorization': `ApiKey ${this.apiKey}`
 			},
 			body: JSON.stringify(experimentSetup),
@@ -164,6 +167,7 @@ export class ExperimentRunner {
 			method: 'POST',
 			headers: {
 				'Content-Type': 'application/json',
+				'Accept-Encoding': 'gzip, deflate, br', // Request compression (fetch handles decompression automatically)
 				'Authorization': `ApiKey ${this.apiKey}`
 			},
 			body: JSON.stringify({
@@ -265,6 +269,7 @@ export class ExperimentRunner {
 			method: 'GET',
 			headers: {
 				'Content-Type': 'application/json',
+				'Accept-Encoding': 'gzip, deflate, br', // Request compression (fetch handles decompression automatically)
 				'Authorization': `ApiKey ${this.apiKey}`
 			}
 		});

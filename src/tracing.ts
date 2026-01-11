@@ -118,62 +118,97 @@ function filterDataRecursive(data: any): any {
 	return applyDataFilters('', data);
 }
 
-// Initialize OpenTelemetry with AIQA exporter
-const aiqaServerUrl = process.env.AIQA_SERVER_URL;
-const exporter = new AIQASpanExporter(aiqaServerUrl);
+// Lazy initialization state
+let initialized = false;
+let provider: NodeTracerProvider | null = null;
+let exporter: AIQASpanExporter | null = null;
+let tracer: trace.Tracer | null = null;
 
-// Check if a TracerProvider is already registered
-const existingProvider = trace.getTracerProvider();
-
-// Check if it's a real SDK provider (has addSpanProcessor method) or just the default NoOp provider
-const isRealProvider = existingProvider && typeof (existingProvider as any).addSpanProcessor === 'function';
-
-let provider: NodeTracerProvider;
-
-if (!isRealProvider) {
-	// No real provider exists, create a new one
-	provider = new NodeTracerProvider({
-		resource: new Resource({
-			[SEMRESATTRS_SERVICE_NAME]: 'example-service',
-		}),
-		sampler: new TraceIdRatioBasedSampler(samplingRate),
-	});
-	
-	provider.addSpanProcessor(new BatchSpanProcessor(exporter));
-	provider.register();
-} else {
-	// Real provider already exists, just add our span processor to it
-	// Check if we've already added our processor to avoid duplicates
-	provider = existingProvider as NodeTracerProvider;
-	let processorAlreadyAdded = false;
-	
-	// Try to check if our exporter is already in the processor list
-	// Note: This is a best-effort check since we can't easily inspect internal processors
-	try {
-		const processors = (provider as any)._spanProcessors;
-		if (processors) {
-			for (const proc of processors) {
-				if (proc && proc._exporter === exporter) {
-					processorAlreadyAdded = true;
-					break;
-				}
-			}
-		}
-	} catch (e) {
-		// If we can't check, assume it's not added and proceed
+/**
+ * Get or initialize the AIQA client singleton.
+ * This function is called automatically when withTracing/withTracingAsync is first used, so you typically
+ * don't need to call it explicitly. However, you can call it manually if you want to:
+ * - Initialize before the first withTracing usage
+ * - Access the client state for advanced usage
+ *
+ * The function loads environment variables (AIQA_SERVER_URL, AIQA_API_KEY, AIQA_COMPONENT_TAG)
+ * and initializes the tracing system.
+ *
+ * The function is idempotent - calling it multiple times is safe and will only initialize once.
+ */
+export function getAIQAClient(): void {
+	if (initialized) {
+		return;
 	}
 	
-	if (!processorAlreadyAdded) {
-		provider.addSpanProcessor(new BatchSpanProcessor(exporter));
-	}
+	ensureTracingInitialized();
 }
 
-// Getting a tracer with the same name ('example-tracer') simply returns a tracer instance;
-// it does NOT link spans automatically within the same trace.
-// Each time you start a new root span (span without a parent), a new trace-id is generated.
-// Spans only share a trace-id if they are started as children of the same trace context.
+/**
+ * Ensure tracing is initialized (lazy initialization)
+ * Thread-safe: uses a flag to ensure initialization only happens once
+ */
+function ensureTracingInitialized(): void {
+	if (initialized) {
+		return;
+	}
+	
+	initialized = true;
+	
+	const aiqaServerUrl = process.env.AIQA_SERVER_URL || 'https://server-aiqa.winterwell.com';
+	exporter = new AIQASpanExporter(aiqaServerUrl);
 
-const tracer = trace.getTracer('example-tracer');
+	// Check if a TracerProvider is already registered
+	const existingProvider = trace.getTracerProvider();
+
+	// Check if it's a real SDK provider (has addSpanProcessor method) or just the default NoOp provider
+	const isRealProvider = existingProvider && typeof (existingProvider as any).addSpanProcessor === 'function';
+
+	if (!isRealProvider) {
+		// No real provider exists, create a new one
+		provider = new NodeTracerProvider({
+			resource: new Resource({
+				[SEMRESATTRS_SERVICE_NAME]: 'example-service',
+			}),
+			sampler: new TraceIdRatioBasedSampler(samplingRate),
+		});
+		
+		provider.addSpanProcessor(new BatchSpanProcessor(exporter));
+		provider.register();
+	} else {
+		// Real provider already exists, just add our span processor to it
+		// Check if we've already added our processor to avoid duplicates
+		provider = existingProvider as NodeTracerProvider;
+		let processorAlreadyAdded = false;
+		
+		// Try to check if our exporter is already in the processor list
+		// Note: This is a best-effort check since we can't easily inspect internal processors
+		try {
+			const processors = (provider as any)._spanProcessors;
+			if (processors) {
+				for (const proc of processors) {
+					if (proc && proc._exporter === exporter) {
+						processorAlreadyAdded = true;
+						break;
+					}
+				}
+			}
+		} catch (e) {
+			// If we can't check, assume it's not added and proceed
+		}
+		
+		if (!processorAlreadyAdded) {
+			provider.addSpanProcessor(new BatchSpanProcessor(exporter));
+		}
+	}
+
+	// Getting a tracer with the same name ('example-tracer') simply returns a tracer instance;
+	// it does NOT link spans automatically within the same trace.
+	// Each time you start a new root span (span without a parent), a new trace-id is generated.
+	// Spans only share a trace-id if they are started as children of the same trace context.
+
+	tracer = trace.getTracer('example-tracer');
+}
 
 /**
  * Flush all pending spans to the server.
@@ -184,10 +219,13 @@ const tracer = trace.getTracer('example-tracer');
  * 
  */
 export async function flushSpans(): Promise<void> {
+	ensureTracingInitialized();
 	if (provider) {
 		await provider.forceFlush();
 	}
-	await exporter.flush();
+	if (exporter) {
+		await exporter.flush();
+	}
 }
 
 /**
@@ -197,14 +235,25 @@ export async function flushSpans(): Promise<void> {
  * which may affect other tracing systems. Use with caution.
  */
 export async function shutdownTracing(): Promise<void> {
+	ensureTracingInitialized();
 	if (provider) {
 		await provider.shutdown();
 	}
-	await exporter.shutdown();
+	if (exporter) {
+		await exporter.shutdown();
+	}
 }
 
-// Export provider and exporter for advanced usage
-export { provider, exporter };
+// Export provider and exporter for advanced usage (lazy getters)
+export function getProvider(): NodeTracerProvider | null {
+	ensureTracingInitialized();
+	return provider;
+}
+
+export function getExporter(): AIQASpanExporter | null {
+	ensureTracingInitialized();
+	return exporter;
+}
 
 /**
  * Options for withTracing and withTracingAsync functions
@@ -229,6 +278,15 @@ export function withTracingAsync(fn: Function, options: TracingOptions = {}) {
 		return fn;
 	}
 	const tracedFn = async (...args: any[]) => {
+		// Lazy initialization: ensure tracing is initialized before creating spans
+		// This is called lazily when the function runs, not at decorator definition time
+		ensureTracingInitialized();
+		
+		if (!tracer) {
+			// Tracing not initialized or disabled, just execute the function
+			return await fn(...args);
+		}
+		
 		const span = tracer.startSpan(fnName);
 		
 		// Set component tag if configured
@@ -302,6 +360,15 @@ export function withTracing(fn: Function, options: TracingOptions = {}) {
 		return fn;
 	}
 	const tracedFn = (...args: any[]) => {
+		// Lazy initialization: ensure tracing is initialized before creating spans
+		// This is called lazily when the function runs, not at decorator definition time
+		ensureTracingInitialized();
+		
+		if (!tracer) {
+			// Tracing not initialized or disabled, just execute the function
+			return fn(...args);
+		}
+		
 		const span = tracer.startSpan(fnName);
 		
 		// Set component tag if configured
@@ -576,6 +643,7 @@ function extractAndSetProviderAndModel(span: any, result: any): void {
 }
 
 export function getActiveSpan() {
+	ensureTracingInitialized();
 	return trace.getActiveSpan();
 }
 
@@ -743,6 +811,7 @@ export function setComponentTag(tag: string): void {
  * ```
  */
 export function getTraceId(): string | undefined {
+	ensureTracingInitialized();
 	const span = trace.getActiveSpan();
 	if (span) {
 		const spanContext = span.spanContext();
@@ -765,6 +834,7 @@ export function getTraceId(): string | undefined {
  * ```
  */
 export function getSpanId(): string | undefined {
+	ensureTracingInitialized();
 	const span = trace.getActiveSpan();
 	if (span) {
 		const spanContext = span.spanContext();
@@ -807,6 +877,16 @@ export function createSpanFromTraceId(
 	parentSpanId?: string,
 	spanName: string = "continued_span"
 ) {
+	ensureTracingInitialized();
+	if (!tracer) {
+		// Fallback: create a basic span if tracer not available
+		const span = trace.getTracer('fallback-tracer').startSpan(spanName);
+		if (componentTag) {
+			span.setAttribute('component', componentTag);
+		}
+		return span;
+	}
+	
 	try {
 		// Create a parent span context
 		const parentSpanContext: SpanContext = {
@@ -831,6 +911,9 @@ export function createSpanFromTraceId(
 	} catch (error) {
 		console.error('AIQA: Error creating span from trace_id:', error instanceof Error ? error.message : String(error));
 		// Fallback: create a new span
+		if (!tracer) {
+			tracer = trace.getTracer('fallback-tracer');
+		}
 		const span = tracer.startSpan(spanName);
 		if (componentTag) {
 			span.setAttribute('component', componentTag);
@@ -911,7 +994,7 @@ export function extractTraceContext(carrier: Record<string, string>) {
  * ```
  */
 export async function getSpan(spanId: string, organisationId?: string): Promise<any | undefined> {
-	const serverUrl = process.env.AIQA_SERVER_URL?.replace(/\/$/, '') || '';
+	const serverUrl = (process.env.AIQA_SERVER_URL || 'https://server-aiqa.winterwell.com').replace(/\/$/, '');
 	const apiKey = process.env.AIQA_API_KEY || '';
 	const orgId = organisationId || process.env.AIQA_ORGANISATION_ID || '';
 	
@@ -936,6 +1019,7 @@ export async function getSpan(spanId: string, organisationId?: string): Promise<
 		
 		const headers: Record<string, string> = {
 			'Content-Type': 'application/json',
+			'Accept-Encoding': 'gzip, deflate, br', // Request compression (fetch handles decompression automatically)
 		};
 		if (apiKey) {
 			headers['Authorization'] = `ApiKey ${apiKey}`;
@@ -1029,4 +1113,94 @@ export async function submitFeedback(
 			throw error;
 		}
 	});
+}
+
+/**
+ * Get organisation information based on API key via an API call.
+ * 
+ * @param organisationId - ID of the organisation to retrieve
+ * @param serverUrl - Optional server URL (defaults to AIQA_SERVER_URL env var)
+ * @param apiKey - Optional API key (defaults to AIQA_API_KEY env var)
+ * @returns Promise that resolves to the organisation object
+ * 
+ * @example
+ * ```typescript
+ * import { getOrganisation } from './src/tracing';
+ * 
+ * const org = await getOrganisation('org-123');
+ * console.log('Organisation:', org.name);
+ * ```
+ */
+export async function getOrganisation(
+	organisationId: string,
+	serverUrl?: string,
+	apiKey?: string
+): Promise<any> {
+	const url = (serverUrl || process.env.AIQA_SERVER_URL || 'https://server-aiqa.winterwell.com').replace(/\/$/, '');
+	const key = apiKey || process.env.AIQA_API_KEY || '';
+	
+	const headers: Record<string, string> = {
+		'Content-Type': 'application/json',
+		'Accept-Encoding': 'gzip, deflate, br', // Request compression (fetch handles decompression automatically)
+	};
+	if (key) {
+		headers['Authorization'] = `ApiKey ${key}`;
+	}
+	
+	const response = await fetch(`${url}/organisation/${organisationId}`, {
+		method: 'GET',
+		headers,
+	});
+	
+	if (!response.ok) {
+		const errorText = await response.text().catch(() => 'Unknown error');
+		throw new Error(`Failed to get organisation: ${response.status} ${response.statusText} - ${errorText}`);
+	}
+	
+	return await response.json();
+}
+
+/**
+ * Get API key information via an API call.
+ * 
+ * @param apiKeyId - ID of the API key to retrieve
+ * @param serverUrl - Optional server URL (defaults to AIQA_SERVER_URL env var)
+ * @param apiKey - Optional API key (defaults to AIQA_API_KEY env var)
+ * @returns Promise that resolves to the API key object
+ * 
+ * @example
+ * ```typescript
+ * import { getAPIKeyInfo } from './src/tracing';
+ * 
+ * const keyInfo = await getAPIKeyInfo('key-123');
+ * console.log('API Key:', keyInfo.name);
+ * ```
+ */
+export async function getAPIKeyInfo(
+	apiKeyId: string,
+	serverUrl?: string,
+	apiKey?: string
+): Promise<any> {
+	const url = (serverUrl || process.env.AIQA_SERVER_URL || 'https://server-aiqa.winterwell.com').replace(/\/$/, '');
+	const key = apiKey || process.env.AIQA_API_KEY || '';
+	
+	const headers: Record<string, string> = {
+		'Content-Type': 'application/json',
+		'Accept-Encoding': 'gzip, deflate, br', // Request compression (fetch handles decompression automatically)
+	};
+	if (key) {
+		headers['Authorization'] = `ApiKey ${key}`;
+	}
+	
+	const response = await fetch(`${url}/api-key/${apiKeyId}`, {
+		method: 'GET',
+		headers,
+	});
+	
+	if (!response.ok) {
+		const errorText = await response.text().catch(() => 'Unknown error');
+		throw new Error(`Failed to get api key info: ${response.status} ${response.statusText} - ${errorText}`);
+	}
+	
+	return await response.json();
 }

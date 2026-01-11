@@ -60,7 +60,7 @@ export class AIQASpanExporter implements SpanExporter {
   private shutdownRequested: boolean = false;
 
   constructor(
-    serverUrl: string = 'http://localhost:3000',
+    serverUrl: string = process.env.AIQA_SERVER_URL || 'https://server-aiqa.winterwell.com',
     apiKey: string = process.env.AIQA_API_KEY || '',
     flushIntervalSeconds: number = 5
   ) {
@@ -429,6 +429,7 @@ export class AIQASpanExporter implements SpanExporter {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
+        'Accept-Encoding': 'gzip, deflate, br', // Request compression (fetch handles decompression automatically)
         'Authorization': `ApiKey ${this.apiKey}`,
       },
       body: JSON.stringify(spans),
