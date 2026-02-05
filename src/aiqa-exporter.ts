@@ -5,13 +5,14 @@
 
 import { ReadableSpan, SpanExporter } from '@opentelemetry/sdk-trace-base';
 import { ExportResult, ExportResultCode } from '@opentelemetry/core';
+import { filterDataRecursive } from './data-filters';
 
 interface SerializableSpan {
   name: string;
   kind: number;
-  parentSpanId?: string;
-  startTime: [number, number];
-  endTime: [number, number];
+  parent_span_id?: string;
+  start_time: number;
+  end_time?: number;
   status: {
     code: number;
     message?: string;
@@ -26,16 +27,16 @@ interface SerializableSpan {
   }>;
   events: Array<{
     name: string;
-    time: [number, number];
+    time: number;
     attributes?: Record<string, any>;
   }>;
   resource: {
     attributes: Record<string, any>;
   };
-  traceId: string;
-  spanId: string;
+  trace_id: string;
+  id: string;
   traceFlags: number;
-  duration: [number, number];
+  duration?: number;
   ended: boolean;
   instrumentationLibrary: {
     name: string;
@@ -54,7 +55,7 @@ export class AIQASpanExporter implements SpanExporter {
   private maxBatchSizeBytes: number = 5 * 1024 * 1024; // 5MB default
   private maxBufferSpans: number = 10000; // Maximum spans to buffer (prevents unbounded growth)
   private buffer: SerializableSpan[] = [];
-  private bufferSpanKeys: Set<string> = new Set(); // Track (traceId, spanId) tuples to prevent duplicates
+  private bufferSpanKeys: Set<string> = new Set(); // Track (trace_id, id) tuples to prevent duplicates
   private flushTimer?: NodeJS.Timeout;
   private flushLock: Promise<void> = Promise.resolve();
   private shutdownRequested: boolean = false;
@@ -101,7 +102,7 @@ export class AIQASpanExporter implements SpanExporter {
       }
       
       const serialized = this.serializeSpan(span);
-      const spanKey = `${serialized.traceId}:${serialized.spanId}`;
+      const spanKey = `${serialized.trace_id}:${serialized.id}`;
       
       if (!this.bufferSpanKeys.has(spanKey)) {
         serializedSpans.push(serialized);
@@ -124,108 +125,12 @@ export class AIQASpanExporter implements SpanExporter {
     }
   }
 
-  /**
-   * Get enabled filters from AIQA_DATA_FILTERS env var
-   */
-  private getEnabledFilters(): Set<string> {
-    const filtersEnv = process.env.AIQA_DATA_FILTERS || "RemovePasswords, RemoveJWT";
-    if (!filtersEnv) {
-      return new Set();
-    }
-    return new Set(filtersEnv.split(',').map(f => f.trim()).filter(f => f));
-  }
 
   /**
-   * Check if a value looks like a JWT token
+   * Convert HrTime tuple [seconds, nanoseconds] to epoch milliseconds
    */
-  private isJWTToken(value: any): boolean {
-    if (typeof value !== 'string') {
-      return false;
-    }
-    // JWT tokens have format: header.payload.signature (3 parts separated by dots)
-    // They typically start with "eyJ" (base64 encoded '{"')
-    const parts = value.split('.');
-    return parts.length === 3 && value.startsWith('eyJ') && parts.every(p => p.length > 0);
-  }
-
-  /**
-   * Check if a value looks like an API key
-   */
-  private isAPIKey(value: any): boolean {
-    if (typeof value !== 'string') {
-      return false;
-    }
-    const trimmed = value.trim();
-    // Common API key prefixes
-    const apiKeyPrefixes = ['sk-', 'pk-', 'AKIA', 'ghp_', 'gho_', 'ghu_', 'ghs_', 'ghr_'];
-    return apiKeyPrefixes.some(prefix => trimmed.startsWith(prefix));
-  }
-
-  /**
-   * Apply data filters to a key-value pair
-   */
-  private applyDataFilters(key: string, value: any): any {
-    // Don't filter falsy values
-    if (!value) {
-      return value;
-    }
-    
-    const enabledFilters = this.getEnabledFilters();
-    const keyLower = key.toLowerCase();
-    
-    // RemovePasswords filter: if key contains "password", replace value with "****"
-    if (enabledFilters.has('RemovePasswords') && keyLower.includes('password')) {
-      return '****';
-    }
-    
-    // RemoveJWT filter: if value looks like a JWT token, replace with "****"
-    if (enabledFilters.has('RemoveJWT') && this.isJWTToken(value)) {
-      return '****';
-    }
-    
-    // RemoveAuthHeaders filter: if key is "authorization" (case-insensitive), replace value with "****"
-    if (enabledFilters.has('RemoveAuthHeaders') && keyLower === 'authorization') {
-      return '****';
-    }
-    
-    // RemoveAPIKeys filter: if key contains API key patterns or value looks like an API key
-    if (enabledFilters.has('RemoveAPIKeys')) {
-      // Check key patterns
-      const apiKeyKeyPatterns = ['api_key', 'apikey', 'api-key', 'apikey'];
-      if (apiKeyKeyPatterns.some(pattern => keyLower.includes(pattern))) {
-        return '****';
-      }
-      // Check value patterns
-      if (this.isAPIKey(value)) {
-        return '****';
-      }
-    }
-    
-    return value;
-  }
-
-  /**
-   * Recursively apply data filters to nested structures
-   */
-  private filterDataRecursive(data: any): any {
-    if (data == null) {
-      return data;
-    }
-    
-    if (Array.isArray(data)) {
-      return data.map(item => this.filterDataRecursive(item));
-    }
-    
-    if (typeof data === 'object') {
-      const result: any = {};
-      for (const [k, v] of Object.entries(data)) {
-        const filteredValue = this.applyDataFilters(k, v);
-        result[k] = this.filterDataRecursive(filteredValue);
-      }
-      return result;
-    }
-    
-    return this.applyDataFilters('', data);
+  private hrTimeToMillis(hrTime: [number, number]): number {
+    return hrTime[0] * 1000 + Math.floor(hrTime[1] / 1_000_000);
   }
 
   /**
@@ -233,36 +138,40 @@ export class AIQASpanExporter implements SpanExporter {
    */
   private serializeSpan(span: ReadableSpan): SerializableSpan {
     const spanContext = span.spanContext();
+    const startTime = this.hrTimeToMillis(span.startTime);
+    const endTime = span.endTime ? this.hrTimeToMillis(span.endTime) : undefined;
+    const duration = span.duration ? this.hrTimeToMillis(span.duration) : undefined;
+    
     return {
       name: span.name,
       kind: span.kind,
-      parentSpanId: span.parentSpanId,
-      startTime: span.startTime,
-      endTime: span.endTime,
+      parent_span_id: span.parentSpanId,
+      start_time: startTime,
+      end_time: endTime,
       status: {
         code: span.status.code,
         message: span.status.message,
       },
-      attributes: this.filterDataRecursive(span.attributes),
+      attributes: filterDataRecursive(span.attributes),
       links: span.links.map(link => ({
         context: {
           traceId: link.context.traceId,
           spanId: link.context.spanId,
         },
-        attributes: this.filterDataRecursive(link.attributes),
+        attributes: filterDataRecursive(link.attributes),
       })),
       events: span.events.map(event => ({
         name: event.name,
-        time: event.time,
-        attributes: this.filterDataRecursive(event.attributes),
+        time: this.hrTimeToMillis(event.time),
+        attributes: filterDataRecursive(event.attributes),
       })),
       resource: {
-        attributes: this.filterDataRecursive(span.resource.attributes),
+        attributes: filterDataRecursive(span.resource.attributes),
       },
-      traceId: spanContext.traceId,
-      spanId: spanContext.spanId,
+      trace_id: spanContext.traceId,
+      id: spanContext.spanId,
       traceFlags: spanContext.traceFlags,
-      duration: span.duration,
+      duration,
       ended: span.ended,
       instrumentationLibrary: span.instrumentationLibrary,
     };
@@ -273,7 +182,7 @@ export class AIQASpanExporter implements SpanExporter {
    */
   private removeSpanKeysFromTracking(spans: SerializableSpan[]): void {
     for (const span of spans) {
-      const spanKey = `${span.traceId}:${span.spanId}`;
+      const spanKey = `${span.trace_id}:${span.id}`;
       this.bufferSpanKeys.delete(spanKey);
     }
   }
@@ -390,7 +299,7 @@ export class AIQASpanExporter implements SpanExporter {
 
         // Log warning about oversized span
         console.warn(
-          `AIQA: Span '${span.name}' (traceId=${span.traceId}) exceeds maxBatchSizeBytes ` +
+          `AIQA: Span '${span.name}' (trace_id=${span.trace_id}) exceeds maxBatchSizeBytes ` +
           `(${spanSize} bytes > ${this.maxBatchSizeBytes} bytes). Will attempt to send it anyway.`
         );
         // Still create a batch with just this span - we'll try to send it

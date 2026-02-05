@@ -12,6 +12,7 @@ import { BatchSpanProcessor, TraceIdRatioBasedSampler } from '@opentelemetry/sdk
 import { Resource } from '@opentelemetry/resources';
 import { ATTR_CODE_FUNCTION_NAME, SEMRESATTRS_SERVICE_NAME } from '@opentelemetry/semantic-conventions';
 import { AIQASpanExporter } from './aiqa-exporter';
+import { filterDataRecursive } from './data-filters';
 
 // Load environment variables from .env file in client-js directory
 dotenv.config({ path: path.resolve(__dirname, '../.env') });
@@ -28,101 +29,13 @@ if (process.env.AIQA_SAMPLING_RATE) {
 // Component tag to add to all spans (can be set via AIQA_COMPONENT_TAG env var or programmatically)
 let componentTag: string = process.env.AIQA_COMPONENT_TAG || "";
 
-// Data filters configuration
-function getEnabledFilters(): Set<string> {
-	const filtersEnv = process.env.AIQA_DATA_FILTERS || "RemovePasswords, RemoveJWT";
-	if (!filtersEnv) {
-		return new Set();
-	}
-	return new Set(filtersEnv.split(',').map(f => f.trim()).filter(f => f));
-}
-
-function isJWTToken(value: any): boolean {
-	if (typeof value !== 'string') {
-		return false;
-	}
-	// JWT tokens have format: header.payload.signature (3 parts separated by dots)
-	// They typically start with "eyJ" (base64 encoded '{"')
-	const parts = value.split('.');
-	return parts.length === 3 && value.startsWith('eyJ') && parts.every(p => p.length > 0);
-}
-
-function isAPIKey(value: any): boolean {
-	if (typeof value !== 'string') {
-		return false;
-	}
-	const trimmed = value.trim();
-	// Common API key prefixes
-	const apiKeyPrefixes = ['sk-', 'pk-', 'AKIA', 'ghp_', 'gho_', 'ghu_', 'ghs_', 'ghr_'];
-	return apiKeyPrefixes.some(prefix => trimmed.startsWith(prefix));
-}
-
-function applyDataFilters(key: string, value: any): any {
-	// Don't filter falsy values
-	if (!value) {
-		return value;
-	}
-	
-	const enabledFilters = getEnabledFilters();
-	const keyLower = key.toLowerCase();
-	
-	// RemovePasswords filter: if key contains "password", replace value with "****"
-	if (enabledFilters.has('RemovePasswords') && keyLower.includes('password')) {
-		return '****';
-	}
-	
-	// RemoveJWT filter: if value looks like a JWT token, replace with "****"
-	if (enabledFilters.has('RemoveJWT') && isJWTToken(value)) {
-		return '****';
-	}
-	
-	// RemoveAuthHeaders filter: if key is "authorization" (case-insensitive), replace value with "****"
-	if (enabledFilters.has('RemoveAuthHeaders') && keyLower === 'authorization') {
-		return '****';
-	}
-	
-	// RemoveAPIKeys filter: if key contains API key patterns or value looks like an API key
-	if (enabledFilters.has('RemoveAPIKeys')) {
-		// Check key patterns
-		const apiKeyKeyPatterns = ['api_key', 'apikey', 'api-key', 'apikey'];
-		if (apiKeyKeyPatterns.some(pattern => keyLower.includes(pattern))) {
-			return '****';
-		}
-		// Check value patterns
-		if (isAPIKey(value)) {
-			return '****';
-		}
-	}
-	
-	return value;
-}
-
-function filterDataRecursive(data: any): any {
-	if (data == null) {
-		return data;
-	}
-	
-	if (Array.isArray(data)) {
-		return data.map(item => filterDataRecursive(item));
-	}
-	
-	if (typeof data === 'object') {
-		const result: any = {};
-		for (const [k, v] of Object.entries(data)) {
-			const filteredValue = applyDataFilters(k, v);
-			result[k] = filterDataRecursive(filteredValue);
-		}
-		return result;
-	}
-	
-	return applyDataFilters('', data);
-}
 
 // Lazy initialization state
 let initialized = false;
 let provider: NodeTracerProvider | null = null;
 let exporter: AIQASpanExporter | null = null;
 let tracer: trace.Tracer | null = null;
+let tracingEnabled: boolean = true; // Whether tracing is enabled (set to false if env vars missing)
 
 /**
  * Get or initialize the AIQA client singleton.
@@ -156,7 +69,21 @@ function ensureTracingInitialized(): void {
 	initialized = true;
 	
 	const aiqaServerUrl = process.env.AIQA_SERVER_URL || 'https://server-aiqa.winterwell.com';
-	exporter = new AIQASpanExporter(aiqaServerUrl);
+	const aiqaApiKey = process.env.AIQA_API_KEY || '';
+	
+	// Gracefully disable if required environment variables are not set
+	if (!aiqaApiKey) {
+		console.warn('AIQA: WARNING: Tracing is disabled: missing required environment variables: AIQA_API_KEY');
+		console.warn('AIQA: Your application will continue to run without tracing.');
+		tracingEnabled = false;
+		tracer = null;
+		provider = null;
+		exporter = null;
+		return;
+	}
+	
+	tracingEnabled = true;
+	exporter = new AIQASpanExporter(aiqaServerUrl, aiqaApiKey);
 
 	// Check if a TracerProvider is already registered
 	const existingProvider = trace.getTracerProvider();
@@ -202,12 +129,12 @@ function ensureTracingInitialized(): void {
 		}
 	}
 
-	// Getting a tracer with the same name ('example-tracer') simply returns a tracer instance;
+	// Getting a tracer with the same name ('aiqa-tracer') simply returns a tracer instance;
 	// it does NOT link spans automatically within the same trace.
 	// Each time you start a new root span (span without a parent), a new trace-id is generated.
 	// Spans only share a trace-id if they are started as children of the same trace context.
 
-	tracer = trace.getTracer('example-tracer');
+	tracer = trace.getTracer('aiqa-tracer');
 }
 
 /**
@@ -236,12 +163,15 @@ export async function flushSpans(): Promise<void> {
  */
 export async function shutdownTracing(): Promise<void> {
 	ensureTracingInitialized();
+	// Disable tracing to prevent attempts to use shut-down system
+	tracingEnabled = false;
 	if (provider) {
 		await provider.shutdown();
 	}
 	if (exporter) {
 		await exporter.shutdown();
 	}
+	tracer = null;
 }
 
 // Export provider and exporter for advanced usage (lazy getters)
@@ -253,6 +183,17 @@ export function getProvider(): NodeTracerProvider | null {
 export function getExporter(): AIQASpanExporter | null {
 	ensureTracingInitialized();
 	return exporter;
+}
+
+/**
+ * Check if tracing is currently enabled.
+ * Tracing is disabled if AIQA_API_KEY is not set.
+ * 
+ * @returns True if tracing is enabled, false otherwise
+ */
+export function isTracingEnabled(): boolean {
+	ensureTracingInitialized();
+	return tracingEnabled;
 }
 
 /**
@@ -282,7 +223,7 @@ export function withTracingAsync(fn: Function, options: TracingOptions = {}) {
 		// This is called lazily when the function runs, not at decorator definition time
 		ensureTracingInitialized();
 		
-		if (!tracer) {
+		if (!tracingEnabled || !tracer) {
 			// Tracing not initialized or disabled, just execute the function
 			return await fn(...args);
 		}
@@ -291,7 +232,7 @@ export function withTracingAsync(fn: Function, options: TracingOptions = {}) {
 		
 		// Set component tag if configured
 		if (componentTag) {
-			span.setAttribute('component', componentTag);
+			span.setAttribute('gen_ai.component.id', componentTag);
 		}
 		
 		// Trace inputs using input. attributes
@@ -312,10 +253,7 @@ export function withTracingAsync(fn: Function, options: TracingOptions = {}) {
 			span.setAttribute('input', filteredInput);
 		}
 		try {
-			// call the function
-			const traceId = span.spanContext().traceId;
-			console.log('AIQA: do traceable stuff', { fnName, traceId });
-			const curriedFn = () => fn(...args)
+			const curriedFn = () => fn(...args);
 			const result = await context.with(trace.setSpan(context.active(), span), curriedFn);
 			// Trace output
 			let output = result;
@@ -343,7 +281,6 @@ export function withTracingAsync(fn: Function, options: TracingOptions = {}) {
 		}
 	};
 	tracedFn._isTraced = true; // avoid double wrapping
-	console.log('AIQA: Function ' + fnName + ' is now traced');
 	return tracedFn;
 }
 
@@ -364,7 +301,7 @@ export function withTracing(fn: Function, options: TracingOptions = {}) {
 		// This is called lazily when the function runs, not at decorator definition time
 		ensureTracingInitialized();
 		
-		if (!tracer) {
+		if (!tracingEnabled || !tracer) {
 			// Tracing not initialized or disabled, just execute the function
 			return fn(...args);
 		}
@@ -373,7 +310,7 @@ export function withTracing(fn: Function, options: TracingOptions = {}) {
 		
 		// Set component tag if configured
 		if (componentTag) {
-			span.setAttribute('component', componentTag);
+			span.setAttribute('gen_ai.component.id', componentTag);
 		}
 		
 		// Trace inputs using input. attributes
@@ -394,10 +331,7 @@ export function withTracing(fn: Function, options: TracingOptions = {}) {
 			span.setAttribute('input', filteredInput);
 		}
 		try {
-			// call the function
-			const traceId = span.spanContext().traceId;
-			console.log('AIQA: do traceable stuff', { fnName, traceId });
-			const curriedFn = () => fn(...args)
+			const curriedFn = () => fn(...args);
 			const result = context.with(trace.setSpan(context.active(), span), curriedFn);
 			// Trace output
 			let output = result;
@@ -425,7 +359,6 @@ export function withTracing(fn: Function, options: TracingOptions = {}) {
 		}
 	};
 	tracedFn._isTraced = true; // avoid double wrapping
-	console.log('AIQA: Function ' + fnName + ' is now traced');
 	return tracedFn;
 }
 
@@ -436,7 +369,7 @@ export function setSpanAttribute(attributeName: string, attributeValue: any) {
 	if (span) {
 		const filteredValue = filterDataRecursive(attributeValue);
 		span.setAttribute(attributeName, filteredValue);
-		return true
+		return true;
 	}
 	return false; // no span found
 }
@@ -878,14 +811,14 @@ export function createSpanFromTraceId(
 	spanName: string = "continued_span"
 ) {
 	ensureTracingInitialized();
-	if (!tracer) {
-		// Fallback: create a basic span if tracer not available
-		const span = trace.getTracer('fallback-tracer').startSpan(spanName);
-		if (componentTag) {
-			span.setAttribute('component', componentTag);
+		if (!tracer) {
+			// Fallback: create a basic span if tracer not available
+			const span = trace.getTracer('aiqa-tracer').startSpan(spanName);
+			if (componentTag) {
+				span.setAttribute('gen_ai.component.id', componentTag);
+			}
+			return span;
 		}
-		return span;
-	}
 	
 	try {
 		// Create a parent span context
@@ -904,19 +837,17 @@ export function createSpanFromTraceId(
 		
 		// Set component tag if configured
 		if (componentTag) {
-			span.setAttribute('component', componentTag);
+			span.setAttribute('gen_ai.component.id', componentTag);
 		}
 		
 		return span;
 	} catch (error) {
 		console.error('AIQA: Error creating span from trace_id:', error instanceof Error ? error.message : String(error));
-		// Fallback: create a new span
-		if (!tracer) {
-			tracer = trace.getTracer('fallback-tracer');
-		}
-		const span = tracer.startSpan(spanName);
+		// Fallback: new root span (not linked to requested trace). Do not mutate module-level tracer.
+		const fallbackTracer = tracer ?? trace.getTracer('aiqa-tracer');
+		const span = fallbackTracer.startSpan(spanName);
 		if (componentTag) {
-			span.setAttribute('component', componentTag);
+			span.setAttribute('gen_ai.component.id', componentTag);
 		}
 		return span;
 	}
@@ -978,9 +909,8 @@ export function extractTraceContext(carrier: Record<string, string>) {
  * Get a span by its ID from the AIQA server.
  * 
  * @param spanId - The span ID as a hexadecimal string (16 characters) or client span ID
- * @param organisationId - Optional organisation ID. If not provided, will try to get from
- *   AIQA_ORGANISATION_ID environment variable. The organisation is typically extracted from
- *   the API key during authentication, but the API requires it as a query parameter.
+ * @param organisationId - Optional. When using API key auth the server derives organisation from the key.
+ *   Pass this (or set AIQA_ORGANISATION_ID) only when the server expects it (e.g. some JWT flows).
  * @returns Promise that resolves to the span data, or undefined if not found
  * 
  * @example
@@ -997,59 +927,42 @@ export async function getSpan(spanId: string, organisationId?: string): Promise<
 	const serverUrl = (process.env.AIQA_SERVER_URL || 'https://server-aiqa.winterwell.com').replace(/\/$/, '');
 	const apiKey = process.env.AIQA_API_KEY || '';
 	const orgId = organisationId || process.env.AIQA_ORGANISATION_ID || '';
-	
+
 	if (!serverUrl) {
 		console.warn('AIQA: AIQA_SERVER_URL is not set. Cannot retrieve span.');
 		return undefined;
 	}
-	
-	if (!orgId) {
-		console.warn('AIQA: Organisation ID is required. Provide it as parameter or set AIQA_ORGANISATION_ID environment variable.');
+
+	// Server uses GET /span?q=id:xxx (search). For API key auth, organisation is derived from the key.
+	const queryParams = new URLSearchParams({ q: `id:${spanId}` });
+	if (orgId) {
+		queryParams.set('organisation', orgId);
+	}
+	const url = `${serverUrl}/span?${queryParams.toString()}`;
+
+	const headers: Record<string, string> = {
+		'Content-Type': 'application/json',
+		'Accept-Encoding': 'gzip, deflate, br',
+	};
+	if (apiKey) {
+		headers['Authorization'] = `ApiKey ${apiKey}`;
+	}
+
+	const response = await fetch(url, { method: 'GET', headers });
+
+	if (response.status === 200) {
+		const result = await response.json();
+		const hits = result.hits || [];
+		if (hits.length > 0) {
+			return hits[0];
+		}
+	} else if (response.status === 404) {
 		return undefined;
+	} else {
+		const errorText = await response.text().catch(() => 'Unknown error');
+		console.warn(`AIQA: Failed to get span: ${response.status} - ${errorText.substring(0, 200)}`);
 	}
-	
-	// Try both spanId and clientSpanId queries
-	for (const queryField of ['spanId', 'clientSpanId']) {
-		const url = `${serverUrl}/span`;
-		const params = new URLSearchParams({
-			q: `${queryField}:${spanId}`,
-			organisation: orgId,
-			limit: '1',
-		});
-		
-		const headers: Record<string, string> = {
-			'Content-Type': 'application/json',
-			'Accept-Encoding': 'gzip, deflate, br', // Request compression (fetch handles decompression automatically)
-		};
-		if (apiKey) {
-			headers['Authorization'] = `ApiKey ${apiKey}`;
-		}
-		
-		try {
-			const response = await fetch(`${url}?${params.toString()}`, {
-				method: 'GET',
-				headers,
-			});
-			
-			if (response.status === 200) {
-				const result = await response.json();
-				const hits = result.hits || [];
-				if (hits.length > 0) {
-					return hits[0];
-				}
-			} else if (response.status === 400) {
-				// Try next query field
-				continue;
-			} else {
-				const errorText = await response.text().catch(() => 'Unknown error');
-				console.warn(`AIQA: Failed to get span: ${response.status} - ${errorText.substring(0, 200)}`);
-			}
-		} catch (error: any) {
-			console.warn(`AIQA: Error getting span: ${error.message}`);
-			continue;
-		}
-	}
-	
+
 	return undefined;
 }
 
@@ -1057,6 +970,7 @@ export async function getSpan(spanId: string, organisationId?: string): Promise<
  * Submit feedback for a trace by creating a new span with the same trace ID.
  * This allows you to add feedback (thumbs-up, thumbs-down, comment) to a trace after it has completed.
  * 
+ * @param thumbsUp - true -> value:positive, false -> value:negative, undefined -> value:neutral
  * @param traceId - The trace ID as a hexadecimal string (32 characters)
  * @param feedback - Feedback object with:
  *   - thumbsUp: true for positive feedback, false for negative feedback, undefined for neutral
@@ -1090,10 +1004,9 @@ export async function submitFeedback(
 		try {
 			// Set feedback attributes
 			if (feedback.thumbsUp !== undefined) {
-				span.setAttribute('feedback.thumbs_up', feedback.thumbsUp);
-				span.setAttribute('feedback.type', feedback.thumbsUp ? 'positive' : 'negative');
+				span.setAttribute('feedback.value', feedback.thumbsUp ? 'positive' : 'negative');
 			} else {
-				span.setAttribute('feedback.type', 'neutral');
+				span.setAttribute('feedback.value', 'neutral');
 			}
 			
 			if (feedback.comment) {

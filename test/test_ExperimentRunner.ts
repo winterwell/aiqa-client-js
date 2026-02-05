@@ -49,7 +49,7 @@ tap.test('test_ExperimentRunner_stepwise_local', async t => {
 
 	for (const eg of exampleInputs) {
 		const result = await experimentRunner.runExample(eg, myEngine, scorer);
-		if (result && result.length > 0) {
+		if (result) {
 			console.log(`Scored example ${eg.id}:`, JSON.stringify(result, null, 2));
 		} else {
 			console.log(`No results for example ${eg.id}`);

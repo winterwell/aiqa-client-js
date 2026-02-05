@@ -113,7 +113,6 @@ export class ExperimentRunner {
 	 * @param experiment - optional setup for the experiment object. You may wish to set: 
 	 * - name (recommended for labelling the experiment)
 	 * - parameters
-	 * - comparison_parameters
 	 * @returns the created experiment object
 	 */
 	async createExperiment(experimentSetup?: Partial<Experiment>): Promise<Experiment> {
@@ -129,7 +128,7 @@ export class ExperimentRunner {
 			organisation: this.organisation,
 			dataset: this.datasetId,
 			results: [],
-			summary_results: {},
+			summaries: {},
 		};
 		console.log('AIQA: Creating experiment');
 		const response = await fetch(`${this.serverUrl}/experiment`, {
@@ -172,7 +171,7 @@ export class ExperimentRunner {
 			},
 			body: JSON.stringify({
 				output: result,
-				traceId: example.traceId,
+				trace: example.trace,
 				scores
 			}),
 		});
@@ -193,75 +192,51 @@ export class ExperimentRunner {
 		const examples = await this.getExampleInputs();
 
 		for (const example of examples) {
-			const scores = await this.runExample(example, engine, scorer);
-			if (scores) {
+			const result = await this.runExample(example, engine, scorer);
+			if (result) {
 				this.scores.push({
 					example,
-					result: scores,
-					scores: scores,
+					result,
+					scores: result,
 				});
 			}
 		}
 	}
 
 	/**
-	 * Run the engine on an example with the given parameters (looping over comparison parameters), and score the result.
-	 * Also calls scoreAndStore to store the result in the server.
-	 * @param example 
-	 * @param callMyCode 
-	 * @param scoreThisOutput 
-	 * @returns one set of scores for each comparison parameter set. If no comparison parameters, returns an array of one.
+	 * Run the engine on an example with the experiment's parameters, score the result, and store it.
 	 */
 	async runExample(example: Example,
 		callMyCode: (input: any, parameters: Record<string, any>) => any | Promise<any>,
-		scoreThisOutput: (output: any, example: Example, parameters: Record<string, any>) => Promise<Record<string, number>>): Promise<ScoreResult[]> {
-		// Ensure experiment exists
-		if (!this.experiment) {inline
+		scoreThisOutput: (output: any, example: Example, parameters: Record<string, any>) => Promise<Record<string, number>>): Promise<ScoreResult | null> {
+		if (!this.experiment) {
 			await this.createExperiment();
 		}
 		if (!this.experiment) {
 			throw new Error('Failed to create experiment');
 		}
-		// make the parameters
-		let parametersFixed = this.experiment.parameters || {};
-		// If comparison_parameters is empty/undefined, default to [{}] so we run at least once
-		let parametersLoop = this.experiment.comparison_parameters || [{}];
-		// Handle both spans array and input field
+		const parametersHere = this.experiment.parameters || {};
 		const input = example.input || (example.spans && example.spans.length > 0 ? example.spans[0].attributes?.input : undefined);
 		if (!input) {
 			console.warn('AIQA: Example has no input field or spans with input attribute:', example);
-			// run engine anyway -- this could make sense if its all about the parameters
 		}
-		let allScores: ScoreResult[] = [];
-		// This loop should not be parallelized - it should run sequentially, one after the other - to avoid creating interference between the runs.
-		for (const parameters of parametersLoop) {			
-			const parametersHere = { ...parametersFixed, ...parameters };
-			console.log('AIQA: Running with parameters:', parametersHere);
-			// set env vars from parametersHere
-			for (const [key, value] of Object.entries(parametersHere)) {
-				if (value) {
-					process.env[key] = value.toString();
-				}
+		console.log('AIQA: Running with parameters:', parametersHere);
+		for (const [key, value] of Object.entries(parametersHere)) {
+			if (value) {
+				process.env[key] = value.toString();
 			}
-			const start = Date.now();
-			let pOutput = callMyCode(input, parametersHere);
-			const output = pOutput instanceof Promise ? await pOutput : pOutput;
-			console.log('AIQA: Output:', output);
-			const end = Date.now();
-			const duration = end - start;
-
-			let scores = {}
-			if (scoreThisOutput) {
-				scores = await scoreThisOutput(output, example, parametersHere);
-			}
-			scores['duration'] = duration;
-			// TODO this call as async and wait for all to complete before returning
-			console.log('AIQA: Call scoreAndStore ... for example:', example.id, 'with scores:', scores);
-			const result = await this.scoreAndStore(example, output, scores);
-			console.log('AIQA: scoreAndStore returned:', result);
-			allScores.push(result);
 		}
-		return allScores;
+		const start = Date.now();
+		const pOutput = callMyCode(input, parametersHere);
+		const output = pOutput instanceof Promise ? await pOutput : pOutput;
+		console.log('AIQA: Output:', output);
+		const duration = Date.now() - start;
+		let scores: Record<string, number> = scoreThisOutput ? await scoreThisOutput(output, example, parametersHere) : {};
+		scores['duration'] = duration;
+		console.log('AIQA: Call scoreAndStore ... for example:', example.id, 'with scores:', scores);
+		const result = await this.scoreAndStore(example, output, scores);
+		console.log('AIQA: scoreAndStore returned:', result);
+		return result;
 	}
 
 	async getSummaryResults(): Promise<Record<string, MetricStats>> {
@@ -278,7 +253,7 @@ export class ExperimentRunner {
 			throw new Error(`Failed to fetch summary results: ${response.status} ${response.statusText} - ${errorText}`);
 		}
 		const experiment2 = await response.json() as Experiment;
-		return experiment2.summary_results || {};
+		return experiment2.summaries || {};
 	}
 }
 
