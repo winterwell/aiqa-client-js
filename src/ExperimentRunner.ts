@@ -13,6 +13,10 @@ interface ExperimentRunnerOptions {
 	serverUrl?: string;
 	apiKey?: string;
 	organisationId?: string;
+	/** max concurrent examples to run; default 1 */
+	parallelism?: number;
+	/** avoid process-wide env side effects when running examples */
+	setEnvFromParameters?: boolean;
 }
 
 interface ScoreResult {
@@ -47,6 +51,8 @@ export class ExperimentRunner {
 	private experiment?: Experiment;
 	private scores: Array<{ example: Example; result: any; scores: ScoreResult }> = [];
 	private summaryResults: Record<string, MetricStats> = {};
+	private parallelism: number;
+	private setEnvFromParameters: boolean;
 
 	constructor(options: ExperimentRunnerOptions) {
 		this.datasetId = options.datasetId;
@@ -54,28 +60,36 @@ export class ExperimentRunner {
 		this.serverUrl = (options.serverUrl || process.env.AIQA_SERVER_URL || 'https://server-aiqa.winterwell.com').replace(/\/$/, '');
 		this.apiKey = options.apiKey || process.env.AIQA_API_KEY || '';
 		this.organisation = options.organisationId;
+		this.parallelism = Math.max(1, Number(options.parallelism || 1));
+		this.setEnvFromParameters = options.setEnvFromParameters === true;
+	}
+
+	private getHeaders(): Record<string, string> {
+		return {
+			'Content-Type': 'application/json',
+			'Accept-Encoding': 'gzip, deflate, br',
+			'Authorization': `ApiKey ${this.apiKey}`
+		};
+	}
+
+	private async requestJson<T>(path: string, method: 'GET' | 'POST', body?: any): Promise<T> {
+		const response = await fetch(`${this.serverUrl}${path}`, {
+			method,
+			headers: this.getHeaders(),
+			body: body == null ? undefined : JSON.stringify(body),
+		});
+		if (!response.ok) {
+			const errorText = await response.text().catch(() => 'Unknown error');
+			throw new Error(`Request failed ${method} ${path}: ${response.status} ${response.statusText} - ${errorText}`);
+		}
+		return await response.json() as T;
 	}
 
 	/**
 	 * Fetch the dataset to get its metrics
 	 */
 	async getDataset(): Promise<Dataset> {
-		const response = await fetch(`${this.serverUrl}/dataset/${this.datasetId}`, {
-			method: 'GET',
-			headers: {
-				'Content-Type': 'application/json',
-				'Accept-Encoding': 'gzip, deflate, br', // Request compression (fetch handles decompression automatically)
-				'Authorization': `ApiKey ${this.apiKey}`
-			},
-		});
-
-		if (!response.ok) {
-			const errorText = await response.text().catch(() => 'Unknown error');
-			throw new Error(`Failed to fetch dataset: ${response.status} ${response.statusText} - ${errorText}`);
-		}
-
-		const dataset = await response.json() as Dataset;
-		return dataset;
+		return this.requestJson<Dataset>(`/dataset/${this.datasetId}`, 'GET');
 	}
 
 	/**
@@ -83,28 +97,16 @@ export class ExperimentRunner {
 	 */
 	async getExampleInputs({ limit = 10000 }: { limit?: number } = {}): Promise<Example[]> {
 		const params = new URLSearchParams();
-		params.append('dataset_id', this.datasetId);
+		params.append('dataset', this.datasetId);
 		if (this.organisation) {
 			params.append('organisation', this.organisation);
 		}
 		params.append('limit', limit.toString()); // Fetch big - probably all the examples
 
-		const response = await fetch(`${this.serverUrl}/example?${params.toString()}`, {
-			method: 'GET',
-			headers: {
-				'Content-Type': 'application/json',
-				'Accept-Encoding': 'gzip, deflate, br', // Request compression (fetch handles decompression automatically)
-				'Authorization': `ApiKey ${this.apiKey}`
-			}
-		},
+		const data = await this.requestJson<{ hits?: Example[]; total?: number; limit?: number; offset?: number }>(
+			`/example?${params.toString()}`,
+			'GET'
 		);
-
-		if (!response.ok) {
-			const errorText = await response.text().catch(() => 'Unknown error');
-			throw new Error(`Failed to fetch example inputs: ${response.status} ${response.statusText} - ${errorText}`);
-		}
-
-		const data = await response.json() as { hits?: Example[]; total?: number; limit?: number; offset?: number };
 		return data.hits || [];
 	}
 
@@ -131,22 +133,7 @@ export class ExperimentRunner {
 			summaries: {},
 		};
 		console.log('AIQA: Creating experiment');
-		const response = await fetch(`${this.serverUrl}/experiment`, {
-			method: 'POST',
-			headers: {
-				'Content-Type': 'application/json',
-				'Accept-Encoding': 'gzip, deflate, br', // Request compression (fetch handles decompression automatically)
-				'Authorization': `ApiKey ${this.apiKey}`
-			},
-			body: JSON.stringify(experimentSetup),
-		});
-
-		if (!response.ok) {
-			const errorText = await response.text().catch(() => 'Unknown error');
-			throw new Error(`Failed to create experiment: ${response.status} ${response.statusText} - ${errorText}`);
-		}
-
-		const experiment = await response.json() as Experiment;
+		const experiment = await this.requestJson<Experiment>(`/experiment`, 'POST', experimentSetup);
 		this.experimentId = experiment.id;
 		this.experiment = experiment;
 		return experiment;
@@ -162,24 +149,15 @@ export class ExperimentRunner {
 		}
 		console.log('AIQA: Scoring and storing example:', example.id);
 		console.log('AIQA: Scores:', scores);
-		const response = await fetch(`${this.serverUrl}/experiment/${this.experimentId}/example/${example.id}/scoreAndStore`, {
-			method: 'POST',
-			headers: {
-				'Content-Type': 'application/json',
-				'Accept-Encoding': 'gzip, deflate, br', // Request compression (fetch handles decompression automatically)
-				'Authorization': `ApiKey ${this.apiKey}`
-			},
-			body: JSON.stringify({
+		const jsonResult = await this.requestJson<any>(
+			`/experiment/${this.experimentId}/example/${example.id}/scoreAndStore`,
+			'POST',
+			{
 				output: result,
 				trace: example.trace,
 				scores
-			}),
-		});
-		if (!response.ok) {
-			const errorText = await response.text().catch(() => 'Unknown error');
-			throw new Error(`Failed to score and store: ${response.status} ${response.statusText} - ${errorText}`);
-		}
-		const jsonResult = await response.json();
+			}
+		);
 		console.log('AIQA: scoreAndStore response:', jsonResult);
 		return jsonResult;
 	}
@@ -190,16 +168,28 @@ export class ExperimentRunner {
 	async run(engine: (input: any) => any | Promise<any>,
 		scorer?: (output: any, example: Example) => Promise<Record<string, number>>): Promise<void> {
 		const examples = await this.getExampleInputs();
-
-		for (const example of examples) {
-			const result = await this.runExample(example, engine, scorer);
-			if (result) {
-				this.scores.push({
-					example,
-					result,
-					scores: result,
-				});
+		let nextIndex = 0;
+		const worker = async () => {
+			while (nextIndex < examples.length) {
+				const index = nextIndex++;
+				const example = examples[index];
+				try {
+					const result = await this.runExample(example, engine, scorer);
+					if (result) {
+						this.scores.push({
+							example,
+							result,
+							scores: result,
+						});
+					}
+				} catch (error) {
+					console.error(`AIQA: Error processing example ${example?.id || 'unknown'}:`, error);
+				}
 			}
+		};
+		const workers = Array.from({ length: Math.min(this.parallelism, examples.length || 1) }, () => worker());
+		for (const running of workers) {
+			await running;
 		}
 	}
 
@@ -221,38 +211,42 @@ export class ExperimentRunner {
 			console.warn('AIQA: Example has no input field or spans with input attribute:', example);
 		}
 		console.log('AIQA: Running with parameters:', parametersHere);
-		for (const [key, value] of Object.entries(parametersHere)) {
-			if (value) {
-				process.env[key] = value.toString();
+		const originalEnvValues: Record<string, string | undefined> = {};
+		if (this.setEnvFromParameters) {
+			for (const [key, value] of Object.entries(parametersHere)) {
+				if (value != null) {
+					originalEnvValues[key] = process.env[key];
+					process.env[key] = String(value);
+				}
 			}
 		}
 		const start = Date.now();
-		const pOutput = callMyCode(input, parametersHere);
-		const output = pOutput instanceof Promise ? await pOutput : pOutput;
-		console.log('AIQA: Output:', output);
-		const duration = Date.now() - start;
-		let scores: Record<string, number> = scoreThisOutput ? await scoreThisOutput(output, example, parametersHere) : {};
-		scores['duration'] = duration;
-		console.log('AIQA: Call scoreAndStore ... for example:', example.id, 'with scores:', scores);
-		const result = await this.scoreAndStore(example, output, scores);
-		console.log('AIQA: scoreAndStore returned:', result);
-		return result;
+		try {
+			const pOutput = callMyCode(input, parametersHere);
+			const output = pOutput instanceof Promise ? await pOutput : pOutput;
+			console.log('AIQA: Output:', output);
+			const duration = Date.now() - start;
+			let scores: Record<string, number> = scoreThisOutput ? await scoreThisOutput(output, example, parametersHere) : {};
+			scores['duration'] = duration;
+			console.log('AIQA: Call scoreAndStore ... for example:', example.id, 'with scores:', scores);
+			const result = await this.scoreAndStore(example, output, scores);
+			console.log('AIQA: scoreAndStore returned:', result);
+			return result;
+		} finally {
+			if (this.setEnvFromParameters) {
+				for (const [key, originalValue] of Object.entries(originalEnvValues)) {
+					if (originalValue == null) {
+						delete process.env[key];
+					} else {
+						process.env[key] = originalValue;
+					}
+				}
+			}
+		}
 	}
 
 	async getSummaryResults(): Promise<Record<string, MetricStats>> {
-		const response = await fetch(`${this.serverUrl}/experiment/${this.experimentId}`, {
-			method: 'GET',
-			headers: {
-				'Content-Type': 'application/json',
-				'Accept-Encoding': 'gzip, deflate, br', // Request compression (fetch handles decompression automatically)
-				'Authorization': `ApiKey ${this.apiKey}`
-			}
-		});
-		if (!response.ok) {
-			const errorText = await response.text().catch(() => 'Unknown error');
-			throw new Error(`Failed to fetch summary results: ${response.status} ${response.statusText} - ${errorText}`);
-		}
-		const experiment2 = await response.json() as Experiment;
+		const experiment2 = await this.requestJson<Experiment>(`/experiment/${this.experimentId}`, 'GET');
 		return experiment2.summaries || {};
 	}
 }

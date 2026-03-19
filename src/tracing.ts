@@ -14,6 +14,8 @@ import { ATTR_CODE_FUNCTION_NAME, SEMRESATTRS_SERVICE_NAME } from '@opentelemetr
 import { AIQASpanExporter } from './aiqa-exporter';
 import { filterDataRecursive } from './data-filters';
 
+const GEN_AI_OPERATION_NAME = 'gen_ai.operation.name';
+
 // Load environment variables from .env file in client-js directory
 dotenv.config({ path: path.resolve(__dirname, '../.env') });
 
@@ -207,6 +209,95 @@ export interface TracingOptions {
 	filterOutput?: (output: any) => any;
 }
 
+function normalizeIgnorePatterns(ignorePatterns?: string | string[]): string[] {
+	if (!ignorePatterns) {
+		return [];
+	}
+	if (Array.isArray(ignorePatterns)) {
+		return ignorePatterns.filter((pattern) => typeof pattern === 'string' && pattern.length > 0);
+	}
+	if (typeof ignorePatterns === 'string') {
+		return [ignorePatterns];
+	}
+	return [];
+}
+
+function matchIgnorePattern(key: string, pattern: string): boolean {
+	if (pattern === key) {
+		return true;
+	}
+	if (!pattern.includes('*') && !pattern.includes('?')) {
+		return false;
+	}
+	const escaped = pattern
+		.replace(/[.+^${}()|[\]\\]/g, '\\$&')
+		.replace(/\*/g, '.*')
+		.replace(/\?/g, '.');
+	const regex = new RegExp(`^${escaped}$`);
+	return regex.test(key);
+}
+
+function applyIgnorePatterns(value: any, ignorePatterns?: string | string[]): any {
+	const patterns = normalizeIgnorePatterns(ignorePatterns);
+	if (!patterns.length || value == null || typeof value !== 'object') {
+		return value;
+	}
+	if (Array.isArray(value)) {
+		return value.map((item) => applyIgnorePatterns(item, patterns));
+	}
+	const input = value as Record<string, any>;
+	const output: Record<string, any> = {};
+	for (const [key, childValue] of Object.entries(input)) {
+		const shouldIgnore = patterns.some((pattern) => matchIgnorePattern(key, pattern));
+		if (shouldIgnore) {
+			continue;
+		}
+		output[key] = applyIgnorePatterns(childValue, patterns);
+	}
+	return output;
+}
+
+function prepareInputForSpan(args: any[], filterInput?: (input: any) => any, ignoreInput?: string | string[]): any {
+	let input: any = args;
+	if (args.length === 0) {
+		input = null;
+	} else if (args.length === 1) {
+		input = args[0];
+	}
+	if (filterInput) {
+		input = filterInput(input);
+	}
+	return applyIgnorePatterns(input, ignoreInput);
+}
+
+function prepareOutputForSpan(output: any, filterOutput?: (output: any) => any, ignoreOutput?: string | string[]): any {
+	let outputForSpan = output;
+	if (filterOutput) {
+		outputForSpan = filterOutput(outputForSpan);
+	}
+	return applyIgnorePatterns(outputForSpan, ignoreOutput);
+}
+
+function isAsyncIterable(value: any): value is AsyncIterable<any> {
+	return value != null && typeof value[Symbol.asyncIterator] === 'function';
+}
+
+function isIterable(value: any): value is Iterable<any> {
+	// Exclude strings: they're iterable but not stream payloads.
+	return value != null && typeof value !== 'string' && typeof value[Symbol.iterator] === 'function';
+}
+
+function setTimeToFirstOutputTokenIfNeeded(span: any, startedAtMs: number, alreadyRecorded: boolean): boolean {
+	if (alreadyRecorded) {
+		return true;
+	}
+	if (!isAttributeSet(span, 'gen_ai.server.time_to_first_output_token')) {
+		const elapsedSeconds = Math.max(0, (Date.now() - startedAtMs) / 1000);
+		span.setAttribute('gen_ai.server.time_to_first_output_token', elapsedSeconds);
+	}
+	return true;
+}
+
 /**
  * Wrap async function to automatically create spans. Records input/output as span attributes.
  * Spans are automatically linked via OpenTelemetry context.
@@ -229,6 +320,7 @@ export function withTracingAsync(fn: Function, options: TracingOptions = {}) {
 		}
 		
 		const span = tracer.startSpan(fnName);
+		const startedAtMs = Date.now();
 		
 		// Set component tag if configured
 		if (componentTag) {
@@ -236,33 +328,58 @@ export function withTracingAsync(fn: Function, options: TracingOptions = {}) {
 		}
 		
 		// Trace inputs using input. attributes
-		let input = args;
-		if (args.length === 0) {
-			input = null;
-		} else if (args.length === 1) {
-			input = args[0];
-		}
-		if (filterInput) {
-			input = filterInput(input);
-		}
-		if (ignoreInput && typeof input === 'object') {
-			// TODO make a copy of input removing fields in ignoreInput
-		}
+		const input = prepareInputForSpan(args, filterInput, ignoreInput);
 		if (input != null) {
 			const filteredInput = filterDataRecursive(input);
 			span.setAttribute('input', filteredInput);
 		}
+		let spanOwnedByStream = false;
 		try {
 			const curriedFn = () => fn(...args);
 			const result = await context.with(trace.setSpan(context.active(), span), curriedFn);
+			if (isAsyncIterable(result)) {
+				spanOwnedByStream = true;
+				let firstRecorded = false;
+				let yieldedCount = 0;
+				let lastValue: any = null;
+				const base = result;
+				const wrapped = {
+					[Symbol.asyncIterator]() {
+						const it = base[Symbol.asyncIterator]();
+						return {
+							async next() {
+								try {
+									const step = await context.with(trace.setSpan(context.active(), span), () => it.next());
+									if (step.done) {
+										extractAndSetTokenUsage(span, lastValue);
+										extractAndSetProviderAndModel(span, lastValue);
+										span.setAttribute('output', filterDataRecursive({
+											type: 'async_iterable',
+											yielded_count: yieldedCount,
+										}));
+										span.setStatus({ code: SpanStatusCode.OK });
+										span.end();
+										return step;
+									}
+									firstRecorded = setTimeToFirstOutputTokenIfNeeded(span, startedAtMs, firstRecorded);
+									yieldedCount++;
+									lastValue = step.value;
+									return step;
+								} catch (exception) {
+									const error = exception instanceof Error ? exception : new Error(String(exception));
+									span.recordException(error);
+									span.setStatus({ code: SpanStatusCode.ERROR, message: error.message });
+									span.end();
+									throw error;
+								}
+							}
+						};
+					}
+				};
+				return wrapped;
+			}
 			// Trace output
-			let output = result;
-			if (filterOutput) {
-				output = filterOutput(output);
-			}
-			if (ignoreOutput && typeof output === 'object') {
-				// TODO make a copy of output removing fields in ignoreOutput
-			}
+			const output = prepareOutputForSpan(result, filterOutput, ignoreOutput);
 			// Extract and set token usage before setting output
 			extractAndSetTokenUsage(span, output);
 			// Extract and set provider/model before setting output
@@ -277,7 +394,9 @@ export function withTracingAsync(fn: Function, options: TracingOptions = {}) {
 			span.setStatus({ code: SpanStatusCode.ERROR, message: error.message });
 			throw error; // Re-throw to maintain error propagation		  
 		} finally {
-			span.end();
+			if (!spanOwnedByStream) {
+				span.end();
+			}
 		}
 	};
 	tracedFn._isTraced = true; // avoid double wrapping
@@ -307,6 +426,7 @@ export function withTracing(fn: Function, options: TracingOptions = {}) {
 		}
 		
 		const span = tracer.startSpan(fnName);
+		const startedAtMs = Date.now();
 		
 		// Set component tag if configured
 		if (componentTag) {
@@ -314,33 +434,58 @@ export function withTracing(fn: Function, options: TracingOptions = {}) {
 		}
 		
 		// Trace inputs using input. attributes
-		let input = args;
-		if (args.length === 0) {
-			input = null;
-		} else if (args.length === 1) {
-			input = args[0];
-		}
-		if (filterInput) {
-			input = filterInput(input);
-		}
-		if (ignoreInput && typeof input === 'object') {
-			// TODO make a copy of input removing fields in ignoreInput
-		}
+		const input = prepareInputForSpan(args, filterInput, ignoreInput);
 		if (input != null) {
 			const filteredInput = filterDataRecursive(input);
 			span.setAttribute('input', filteredInput);
 		}
+		let spanOwnedByStream = false;
 		try {
 			const curriedFn = () => fn(...args);
 			const result = context.with(trace.setSpan(context.active(), span), curriedFn);
+			if (isIterable(result)) {
+				spanOwnedByStream = true;
+				let firstRecorded = false;
+				let yieldedCount = 0;
+				let lastValue: any = null;
+				const base = result;
+				const wrapped = {
+					[Symbol.iterator]() {
+						const it = base[Symbol.iterator]();
+						return {
+							next() {
+								try {
+									const step = context.with(trace.setSpan(context.active(), span), () => it.next());
+									if (step.done) {
+										extractAndSetTokenUsage(span, lastValue);
+										extractAndSetProviderAndModel(span, lastValue);
+										span.setAttribute('output', filterDataRecursive({
+											type: 'iterable',
+											yielded_count: yieldedCount,
+										}));
+										span.setStatus({ code: SpanStatusCode.OK });
+										span.end();
+										return step;
+									}
+									firstRecorded = setTimeToFirstOutputTokenIfNeeded(span, startedAtMs, firstRecorded);
+									yieldedCount++;
+									lastValue = step.value;
+									return step;
+								} catch (exception) {
+									const error = exception instanceof Error ? exception : new Error(String(exception));
+									span.recordException(error);
+									span.setStatus({ code: SpanStatusCode.ERROR, message: error.message });
+									span.end();
+									throw error;
+								}
+							}
+						};
+					}
+				};
+				return wrapped;
+			}
 			// Trace output
-			let output = result;
-			if (filterOutput) {
-				output = filterOutput(output);
-			}
-			if (ignoreOutput && typeof output === 'object') {
-				// TODO make a copy of output removing fields in ignoreOutput
-			}
+			const output = prepareOutputForSpan(result, filterOutput, ignoreOutput);
 			// Extract and set token usage before setting output
 			extractAndSetTokenUsage(span, output);
 			// Extract and set provider/model before setting output
@@ -355,7 +500,9 @@ export function withTracing(fn: Function, options: TracingOptions = {}) {
 			span.setStatus({ code: SpanStatusCode.ERROR, message: error.message });
 			throw error; // Re-throw to maintain error propagation		  
 		} finally {
-			span.end();
+			if (!spanOwnedByStream) {
+				span.end();
+			}
 		}
 	};
 	tracedFn._isTraced = true; // avoid double wrapping
@@ -426,6 +573,13 @@ function extractAndSetTokenUsage(span: any, result: any): void {
 		}
 		
 		let usage: any = null;
+		if (typeof result === 'string') {
+			try {
+				result = JSON.parse(result);
+			} catch (_e) {
+				// Leave result as-is if not JSON.
+			}
+		}
 		
 		// Check if result is an object with 'usage' key
 		try {
@@ -463,6 +617,8 @@ function extractAndSetTokenUsage(span: any, result: any): void {
 				const inputTokens = usage.input_tokens ?? usage.InputTokens;
 				const outputTokens = usage.output_tokens ?? usage.OutputTokens;
 				let totalTokens = usage.total_tokens ?? usage.TotalTokens;
+				const cacheReadTokens = usage.cache_read_input_tokens ?? usage.CacheReadInputTokens;
+				const cacheWriteTokens = usage.cache_creation_input_tokens ?? usage.cache_write_input_tokens ?? usage.CacheCreationInputTokens ?? usage.CacheWriteInputTokens;
 				
 				// Use Bedrock format if OpenAI format not available
 				if (promptTokens == null) {
@@ -486,6 +642,12 @@ function extractAndSetTokenUsage(span: any, result: any): void {
 				}
 				if (totalTokens != null && !isAttributeSet(span, 'gen_ai.usage.total_tokens')) {
 					span.setAttribute('gen_ai.usage.total_tokens', Number(totalTokens));
+				}
+				if (cacheReadTokens != null && !isAttributeSet(span, 'gen_ai.usage.cache_read.input_tokens')) {
+					span.setAttribute('gen_ai.usage.cache_read.input_tokens', Number(cacheReadTokens));
+				}
+				if (cacheWriteTokens != null && !isAttributeSet(span, 'gen_ai.usage.cache_creation.input_tokens')) {
+					span.setAttribute('gen_ai.usage.cache_creation.input_tokens', Number(cacheWriteTokens));
 				}
 			} catch (e) {
 				// If setting attributes fails, log but don't raise
@@ -905,6 +1067,22 @@ export function extractTraceContext(carrier: Record<string, string>) {
 	}
 }
 
+function resolveServerUrl(serverUrl?: string): string {
+	return (serverUrl || process.env.AIQA_SERVER_URL || 'https://server-aiqa.winterwell.com').replace(/\/$/, '');
+}
+
+function buildApiHeaders(apiKey?: string): Record<string, string> {
+	const key = apiKey || process.env.AIQA_API_KEY || '';
+	const headers: Record<string, string> = {
+		'Content-Type': 'application/json',
+		'Accept-Encoding': 'gzip, deflate, br',
+	};
+	if (key) {
+		headers['Authorization'] = `ApiKey ${key}`;
+	}
+	return headers;
+}
+
 /**
  * Get a span by its ID from the AIQA server.
  * 
@@ -924,8 +1102,7 @@ export function extractTraceContext(carrier: Record<string, string>) {
  * ```
  */
 export async function getSpan(spanId: string, organisationId?: string): Promise<any | undefined> {
-	const serverUrl = (process.env.AIQA_SERVER_URL || 'https://server-aiqa.winterwell.com').replace(/\/$/, '');
-	const apiKey = process.env.AIQA_API_KEY || '';
+	const serverUrl = resolveServerUrl();
 	const orgId = organisationId || process.env.AIQA_ORGANISATION_ID || '';
 
 	if (!serverUrl) {
@@ -940,15 +1117,7 @@ export async function getSpan(spanId: string, organisationId?: string): Promise<
 	}
 	const url = `${serverUrl}/span?${queryParams.toString()}`;
 
-	const headers: Record<string, string> = {
-		'Content-Type': 'application/json',
-		'Accept-Encoding': 'gzip, deflate, br',
-	};
-	if (apiKey) {
-		headers['Authorization'] = `ApiKey ${apiKey}`;
-	}
-
-	const response = await fetch(url, { method: 'GET', headers });
+	const response = await fetch(url, { method: 'GET', headers: buildApiHeaders() });
 
 	if (response.status === 200) {
 		const result = await response.json();
@@ -1014,7 +1183,7 @@ export async function submitFeedback(
 			}
 			
 			// Mark as feedback span
-			span.setAttribute('aiqa.span_type', 'feedback');
+			span.setAttribute(GEN_AI_OPERATION_NAME, 'feedback');
 			
 			// End the span
 			span.end();
@@ -1049,20 +1218,11 @@ export async function getOrganisation(
 	serverUrl?: string,
 	apiKey?: string
 ): Promise<any> {
-	const url = (serverUrl || process.env.AIQA_SERVER_URL || 'https://server-aiqa.winterwell.com').replace(/\/$/, '');
-	const key = apiKey || process.env.AIQA_API_KEY || '';
-	
-	const headers: Record<string, string> = {
-		'Content-Type': 'application/json',
-		'Accept-Encoding': 'gzip, deflate, br', // Request compression (fetch handles decompression automatically)
-	};
-	if (key) {
-		headers['Authorization'] = `ApiKey ${key}`;
-	}
+	const url = resolveServerUrl(serverUrl);
 	
 	const response = await fetch(`${url}/organisation/${organisationId}`, {
 		method: 'GET',
-		headers,
+		headers: buildApiHeaders(apiKey),
 	});
 	
 	if (!response.ok) {
@@ -1094,20 +1254,11 @@ export async function getAPIKeyInfo(
 	serverUrl?: string,
 	apiKey?: string
 ): Promise<any> {
-	const url = (serverUrl || process.env.AIQA_SERVER_URL || 'https://server-aiqa.winterwell.com').replace(/\/$/, '');
-	const key = apiKey || process.env.AIQA_API_KEY || '';
-	
-	const headers: Record<string, string> = {
-		'Content-Type': 'application/json',
-		'Accept-Encoding': 'gzip, deflate, br', // Request compression (fetch handles decompression automatically)
-	};
-	if (key) {
-		headers['Authorization'] = `ApiKey ${key}`;
-	}
+	const url = resolveServerUrl(serverUrl);
 	
 	const response = await fetch(`${url}/api-key/${apiKeyId}`, {
 		method: 'GET',
-		headers,
+		headers: buildApiHeaders(apiKey),
 	});
 	
 	if (!response.ok) {
