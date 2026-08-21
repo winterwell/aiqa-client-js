@@ -1,0 +1,66 @@
+{
+  "$ref": "#/definitions/Model",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "Model": {
+      "additionalProperties": false,
+      "properties": {
+        "created": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "key": {
+          "description": "the API key. This IS stored in the database as our code needs it to run LLMs for the user",
+          "type": "string"
+        },
+        "keyEnd": {
+          "description": "Last 4 characters of the apiKey for security when returning model info",
+          "type": "string"
+        },
+        "model": {
+          "description": "if unset, this api-key is used for all models from the provider",
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "organisation": {
+          "type": "string"
+        },
+        "provider": {
+          "enum": [
+            "openai",
+            "anthropic",
+            "google",
+            "azure",
+            "bedrock",
+            "other"
+          ],
+          "type": "string"
+        },
+        "updated": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "organisation",
+        "provider",
+        "name",
+        "created",
+        "updated"
+      ],
+      "type": "object"
+    }
+  }
+}

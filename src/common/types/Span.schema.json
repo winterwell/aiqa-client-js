@@ -1,0 +1,244 @@
+{
+  "$ref": "#/definitions/Span",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "EmbeddingMeta": {
+      "additionalProperties": false,
+      "properties": {
+        "algorithm": { "type": "string" },
+        "dimensions": { "type": "integer" },
+        "model": { "type": "string" },
+        "version": { "type": "string" }
+      },
+      "required": ["model", "dimensions"],
+      "type": "object"
+    },
+    "Span": {
+      "description": "Matches OTel ReadableSpan except: start/end (ms) replace startTime/endTime (HrTime), parent replaces parentSpanId, duration in ms; plus our fields (@timestamp, id, trace, spanId, traceFlags, traceRef, transaction, service, organisation, example, dataset, experiment, annotations, tags, inputHash, _seen).",
+      "additionalProperties": true,
+      "properties": {
+        "@timestamp": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "name": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "integer",
+          "description": "SpanKind: INTERNAL=0, SERVER=1, CLIENT=2, PRODUCER=3, CONSUMER=4"
+        },
+        "parent": {
+          "type": "string",
+          "description": "Parent span ID"
+        },
+        "start": {
+          "type": "number",
+          "description": "Epoch milliseconds"
+        },
+        "end": {
+          "type": "number",
+          "description": "Epoch milliseconds"
+        },
+        "stats": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "Token usage stats"
+        },
+        "status": {
+          "type": "object",
+          "properties": {
+            "code": {
+              "type": "integer",
+              "description": "UNSET=0, OK=1, ERROR=2"
+            },
+            "message": {
+              "type": "string"
+            }
+          }
+        },
+        "attributes": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "links": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "context": {
+                "type": "object",
+                "description": "OTel SpanContext of the linked span",
+                "properties": {
+                  "traceId": { "type": "string" },
+                  "spanId": { "type": "string" },
+                  "traceFlags": { "type": "integer" },
+                  "traceState": { "type": "string" },
+                  "isRemote": { "type": "boolean", "description": "Only true if SpanContext was propagated from a remote parent" }
+                }
+              },
+              "attributes": {
+                "type": "object",
+                "additionalProperties": true
+              },
+              "droppedAttributesCount": { "type": "integer", "description": "Count of link attributes dropped due to collection limits" }
+            }
+          }
+        },
+        "events": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "description": "OTel TimedEvent",
+            "properties": {
+              "name": { "type": "string" },
+              "time": {
+                "type": "number",
+                "description": "Epoch milliseconds"
+              },
+              "attributes": {
+                "type": "object",
+                "additionalProperties": true
+              },
+              "droppedAttributesCount": { "type": "integer", "description": "Count of event attributes dropped due to collection limits" }
+            }
+          }
+        },
+        "duration": {
+          "type": "number",
+          "description": "Duration in milliseconds"
+        },
+        "ended": {
+          "type": "boolean"
+        },
+        "resource": {
+          "type": "object",
+          "properties": {
+            "attributes": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          }
+        },
+        "instrumentationLibrary": {
+          "type": "object",
+          "properties": {
+            "name": { "type": "string" },
+            "version": { "type": "string" }
+          }
+        },
+        "droppedAttributesCount": {
+          "type": "integer"
+        },
+        "droppedEventsCount": {
+          "type": "integer"
+        },
+        "droppedLinksCount": {
+          "type": "integer"
+        },
+        "trace": {
+          "type": "string",
+          "description": "OpenTelemetry trace ID (32 hex characters)"
+        },
+        "id": {
+          "type": "string",
+          "description": "Span ID (OpenTelemetry span ID as hex string)"
+        },
+        "spanId": {
+          "type": "string",
+          "description": "OpenTelemetry span ID (16 hex characters)"
+        },
+        "traceFlags": {
+          "type": "integer",
+          "description": "OpenTelemetry trace flags"
+        },
+        "traceRef": {
+          "type": "object",
+          "properties": {
+            "id": { "type": "string" }
+          }
+        },
+        "transaction": {
+          "type": "object",
+          "properties": {
+            "id": { "type": "string" },
+            "name": { "type": "string" },
+            "type": { "type": "string" },
+            "duration": { "type": "number" }
+          }
+        },
+        "service": {
+          "type": "object",
+          "properties": {
+            "name": { "type": "string" }
+          }
+        },
+        "organisation": {
+          "type": "string"
+        },
+        "example": {
+          "type": "string",
+          "description": "Example.id Only set if (a) an Example is created from this Span, or (b) this Span is created during an experiment running an Example"
+        },
+        "experiment": {
+          "type": "string",
+          "description": "Only set for spans in the `spans` index IF created during an experiment"
+        },
+        "annotations": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "Client-set annotations for the span (for things more complex than a tag). In ES mapping use flattened type."
+        },
+        "inputHash": {
+          "type": "string",
+          "description": "Hash of the input for looking up same-input spans"
+        },
+        "embedding_1": {
+          "description": "Primary cached embedding (default slot); omitted from default API responses",
+          "items": { "type": "number" },
+          "type": "array"
+        },
+        "embeddingMeta_1": {
+          "$ref": "#/definitions/EmbeddingMeta",
+          "description": "Metadata for embedding_1"
+        },
+        "embedding_2": {
+          "description": "Secondary embedding slot; omitted from default API responses",
+          "items": { "type": "number" },
+          "type": "array"
+        },
+        "embeddingMeta_2": {
+          "$ref": "#/definitions/EmbeddingMeta",
+          "description": "Metadata for embedding_2"
+        },
+        "_childStats": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "Track child stats for non-leaf spans to avoid double-counting."
+        }
+      },
+      "required": [
+        "name",
+        "kind",
+        "start",
+        "end",
+        "status",
+        "attributes",
+        "links",
+        "events",
+        "duration",
+        "ended",
+        "resource",
+        "instrumentationLibrary",
+        "droppedAttributesCount",
+        "droppedEventsCount",
+        "droppedLinksCount",
+        "organisation",
+        "id",
+        "trace"
+      ],
+      "type": "object"
+    }
+  }
+}
+

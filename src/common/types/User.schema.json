@@ -1,0 +1,42 @@
+{
+  "$ref": "#/definitions/User",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "User": {
+      "additionalProperties": false,
+      "properties": {
+        "created": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "email": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "isSuperAdmin": {
+          "type": "boolean"
+        },
+        "name": {
+          "type": "string"
+        },
+        "sub": {
+          "description": "Auth0 subject identifier (e.g., \"google-oauth2|109424848053592856653\")",
+          "type": "string"
+        },
+        "updated": {
+          "format": "date-time",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "sub",
+        "created",
+        "updated"
+      ],
+      "type": "object"
+    }
+  }
+}

@@ -1,0 +1,114 @@
+{
+  "$ref": "#/definitions/Experiment",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "LifecycleStatus": {
+      "description": "LifecycleStatus describes the lifecycle state of an entity or process.",
+      "enum": [
+        "draft",
+        "processing",
+        "active",
+        "closing",
+        "closed",
+        "archived",
+        "error"
+      ],
+      "type": "string"
+    },
+    "Experiment": {
+      "additionalProperties": false,
+      "description": "An Experiment is a run of a Dataset of examples over your code, scoring the outputs. Individual results may be traced as per normal tracing.",
+      "properties": {
+        "batch": {
+          "description": "optional - links a set of experiments together for comparison",
+          "type": "string"
+        },
+        "created": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "dataset": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "description": "Good practice to give a meaningful name to the experiment",
+          "type": "string"
+        },
+        "organisation": {
+          "type": "string"
+        },
+        "parameters": {
+          "description": "Parameters for this experiment (e.g. model, temperature). Set as env vars and passed as kwargs to the engine.",
+          "type": "object"
+        },
+        "results": {
+          "items": {
+            "$ref": "#/definitions/Result"
+          },
+          "type": "array"
+        },
+        "summaries": {
+          "description": "metric name: -> summary stats: average, min, max, variance, histogram, count"
+        },
+        "status": {
+          "description": "closed => all results are in.",
+          "$ref": "#/definitions/LifecycleStatus"
+        },
+        "updated": {
+          "format": "date-time",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "dataset",
+        "organisation",
+        "created",
+        "updated"
+      ],
+      "type": "object"
+    },
+    "Result": {
+      "additionalProperties": false,
+      "description": "The Result from one example, with the scores for each metric",
+      "properties": {
+        "errors": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "example": {
+          "type": "string"
+        },
+        "messages": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "rateLimited": {
+          "description": "TODO detect this in scoreAndStore true if this example was affected by a tracing rate-limit \n- so token usage may be incomplete",
+          "type": "boolean"
+        },
+        "scores": {
+          "additionalProperties": {
+            "type": "number"
+          },
+          "type": "object"
+        },
+        "trace": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "example",
+        "scores"
+      ],
+      "type": "object"
+    }
+  }
+}

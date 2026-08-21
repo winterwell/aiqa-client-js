@@ -1,0 +1,73 @@
+{
+  "$ref": "#/definitions/Report",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "LifecycleStatus": {
+      "description": "Lifecycle state of a report run.",
+      "enum": [
+        "draft",
+        "processing",
+        "active",
+        "error"
+      ],
+      "type": "string"
+    },
+    "ReportKind": {
+      "enum": ["drift", "coverage"],
+      "type": "string"
+    },
+    "Report": {
+      "additionalProperties": false,
+      "description": "Embedding-space report: drift over time or dataset vs trace coverage.",
+      "properties": {
+        "created": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "dataset": {
+          "description": "Required for coverage; optional for drift (filter context).",
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/definitions/ReportKind"
+        },
+        "name": {
+          "type": "string"
+        },
+        "organisation": {
+          "type": "string"
+        },
+        "parameters": {
+          "description": "Analysis config: feature targets, PCA/k, time range, limits, etc.",
+          "type": "object"
+        },
+        "results": {
+          "description": "Structured output: clusters, histograms, metrics.",
+          "type": "object"
+        },
+        "status": {
+          "$ref": "#/definitions/LifecycleStatus"
+        },
+        "summary": {
+          "description": "Small headline fields for lists and quick views.",
+          "type": "object"
+        },
+        "updated": {
+          "format": "date-time",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "organisation",
+        "kind",
+        "created",
+        "updated"
+      ],
+      "type": "object"
+    }
+  }
+}

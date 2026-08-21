@@ -1,0 +1,68 @@
+{
+  "$ref": "#/definitions/Organisation",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "Organisation": {
+      "additionalProperties": false,
+      "description": "See OrganisationAccount for subscription and retention period details.",
+      "properties": {
+        "created": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "memberSettings": {
+          "additionalProperties": {
+            "additionalProperties": false,
+            "properties": {
+              "role": {
+                "enum": [
+                  "admin",
+                  "standard"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "role"
+            ],
+            "type": "object"
+          },
+          "description": "user id to user-specific settings for the organisation",
+          "type": "object"
+        },
+        "members": {
+          "description": "User ids of members of the organisation. Must contain the current user's id.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "name": {
+          "type": "string"
+        },
+        "pending": {
+          "description": "Email addresses of users invited but not yet registered. Auto-added to members when they sign up.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "updated": {
+          "format": "date-time",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "members",
+        "created",
+        "updated"
+      ],
+      "type": "object"
+    }
+  }
+}

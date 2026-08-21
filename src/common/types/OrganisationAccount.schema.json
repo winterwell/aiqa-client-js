@@ -1,0 +1,138 @@
+{
+  "$ref": "#/definitions/OrganisationAccount",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "LifecycleStatus": {
+      "description": "LifecycleStatus describes the lifecycle state of an entity or process.",
+      "enum": [
+        "draft",
+        "processing",
+        "active",
+        "closing",
+        "closed",
+        "archived",
+        "error"
+      ],
+      "type": "string"
+    },
+    "OrganisationAccount": {
+      "additionalProperties": false,
+      "properties": {
+        "created": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "experimentRetentionDays": {
+          "type": "number"
+        },
+        "id": {
+          "type": "string"
+        },
+        "maxDatasets": {
+          "type": "number"
+        },
+        "maxExamplesPerDataset": {
+          "type": "number"
+        },
+        "maxMembers": {
+          "type": "number"
+        },
+        "organisation": {
+          "type": "string"
+        },
+        "rateLimitPerHour": {
+          "description": "default: 1000",
+          "type": "number"
+        },
+        "retentionPeriodDays": {
+          "description": "default: 20",
+          "type": "number"
+        },
+        "stripeCustomerId": {
+          "description": "Stripe customer ID",
+          "type": "string"
+        },
+        "stripeSubscriptionId": {
+          "description": "Stripe subscription ID",
+          "type": "string"
+        },
+        "subscription": {
+          "additionalProperties": false,
+          "properties": {
+            "currency": {
+              "enum": [
+                "USD",
+                "EUR",
+                "GBP"
+              ],
+              "type": "string"
+            },
+            "end": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "pricePerMonth": {
+              "type": "number"
+            },
+            "renewal": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "start": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "status": {
+              "$ref": "#/definitions/LifecycleStatus"
+            },
+            "type": {
+              "enum": [
+                "trial",
+                "free",
+                "pro",
+                "enterprise"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "status",
+            "start",
+            "end",
+            "renewal",
+            "pricePerMonth",
+            "currency"
+          ],
+          "type": "object"
+        },
+        "updated": {
+          "format": "date-time",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "organisation",
+        "subscription",
+        "created",
+        "updated"
+      ],
+      "type": "object"
+    }
+  }
+}

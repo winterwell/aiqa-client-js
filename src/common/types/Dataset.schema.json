@@ -1,0 +1,123 @@
+{
+  "$ref": "#/definitions/Dataset",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "Dataset": {
+      "additionalProperties": false,
+      "properties": {
+        "created": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "id": {
+          "description": "uuid",
+          "type": "string"
+        },
+        "metrics": {
+          "items": {
+            "$ref": "#/definitions/Metric"
+          },
+          "type": "array"
+        },
+        "name": {
+          "type": "string"
+        },
+        "organisation": {
+          "type": "string"
+        },
+        "tags": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "updated": {
+          "format": "date-time",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "organisation",
+        "name",
+        "created",
+        "updated"
+      ],
+      "type": "object"
+    },
+    "Metric": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "id": {
+          "description": "often the same as (or a prettified version of) the name",
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "name": {
+          "description": "The display name",
+          "type": "string"
+        },
+        "parameters": {
+          "type": "object"
+        },
+        "prompt": {
+          "description": "for LLM-as-judge",
+          "type": "string"
+        },
+        "promptCriteria": {
+          "description": "Use instead of prompt. For LLM-as-judge with the standard prompt template - this sets the core of \"what criteria should the LLM judge be looking for?\"",
+          "type": "string"
+        },
+        "provider": {
+          "enum": [
+            "openai",
+            "anthropic",
+            "google",
+            "azure",
+            "bedrock",
+            "other"
+          ],
+          "type": "string"
+        },
+        "type": {
+          "description": "how is this metric calculated? number: a number the user should calculate themselves llm: LLM as judge, e.g. \"this answer should be a joke about cats\" system: a built in metric AIQA handles eg token count, duration, etc",
+          "enum": [
+            "javascript",
+            "llm",
+            "number",
+            "contains",
+            "equals",
+            "not_contains",
+            "not_equals",
+            "similar",
+            "system"
+          ],
+          "type": "string"
+        },
+        "unit": {
+          "type": "string"
+        },
+        "value": {
+          "description": "for type:contains|equals|not_contains|not_equals",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "type"
+      ],
+      "type": "object"
+    }
+  }
+}

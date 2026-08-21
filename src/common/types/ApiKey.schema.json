@@ -1,0 +1,59 @@
+{
+  "$ref": "#/definitions/ApiKey",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "ApiKey": {
+      "additionalProperties": false,
+      "properties": {
+        "created": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "hash": {
+          "description": "Only the hash of the API key is stored in the database. This is used to authenticate requests. Hash algorithm: sha256",
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "key": {
+          "description": "The actual API key. This is NOT stored in the database. Only present temporarily in the frontend when generating a new key.",
+          "type": "string"
+        },
+        "keyEnd": {
+          "description": "store the last 4 characters of the API key so the user can identify it in the webapp",
+          "type": "string"
+        },
+        "name": {
+          "description": "Optional name for the API key (for easier identification).",
+          "type": "string"
+        },
+        "organisation": {
+          "type": "string"
+        },
+        "role": {
+          "description": "Role of the API key: 'trace' (can only post spans), 'developer' (most endpoints), or 'admin' (all endpoints)",
+          "enum": [
+            "trace",
+            "developer",
+            "admin"
+          ],
+          "type": "string"
+        },
+        "updated": {
+          "format": "date-time",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "organisation",
+        "hash",
+        "role",
+        "created",
+        "updated"
+      ],
+      "type": "object"
+    }
+  }
+}

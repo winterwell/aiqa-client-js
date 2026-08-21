@@ -1,0 +1,178 @@
+{
+  "$ref": "#/definitions/Example",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "EmbeddingMeta": {
+      "additionalProperties": false,
+      "description": "Describes how the embedding vector was produced.",
+      "properties": {
+        "algorithm": {
+          "description": "e.g. deterministic_hash_v1, openai_embeddings_api",
+          "type": "string"
+        },
+        "dimensions": {
+          "description": "Semantic length of the vector (storage may pad to EMBEDDING_STORAGE_DIMS in ES)",
+          "type": "integer"
+        },
+        "model": {
+          "description": "Logical model id, e.g. openai:text-embedding-3-small",
+          "type": "string"
+        },
+        "version": {
+          "description": "Provider or pipeline version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "model",
+        "dimensions"
+      ],
+      "type": "object"
+    },
+    "Example": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "trace": {
+          "type": "string"
+        },
+        "dataset": {
+          "type": "string"
+        },
+        "organisation": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "notes": {
+          "type": "string"
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "annotations": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "Client-set annotations for the Example (for things more complex than a tag)"
+        },
+        "spans": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "description": "Stripped-down spans (name, id, attributes e.g. input, parent) for example input; not full Span shape"
+        },
+        "input": {
+          "description": "Alternative to spans; any value"
+        },
+        "outputs": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "good": {},
+            "bad": {}
+          }
+        },
+        "metrics": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/Metric"
+          }
+        },
+        "embedding_1": {
+          "description": "Primary cached embedding (default slot); omitted from default API responses",
+          "items": {
+            "type": "number"
+          },
+          "type": "array"
+        },
+        "embeddingMeta_1": {
+          "$ref": "#/definitions/EmbeddingMeta",
+          "description": "Metadata for embedding_1"
+        },
+        "embedding_2": {
+          "description": "Secondary embedding slot; omitted from default API responses",
+          "items": {
+            "type": "number"
+          },
+          "type": "array"
+        },
+        "embeddingMeta_2": {
+          "$ref": "#/definitions/EmbeddingMeta",
+          "description": "Metadata for embedding_2"
+        },
+        "created": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updated": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "dataset",
+        "organisation",
+        "created",
+        "updated"
+      ],
+      "type": "object"
+    },
+    "Metric": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "unit": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "enum": ["javascript", "llm", "number", "contains", "equals", "not_contains", "not_equals", "similar", "system"]
+        },
+        "provider": {
+          "type": "string",
+          "enum": ["openai", "anthropic", "google", "azure", "bedrock", "other"]
+        },
+        "model": {
+          "type": "string"
+        },
+        "prompt": {
+          "type": "string"
+        },
+        "promptCriteria": {
+          "type": "string"
+        },
+        "code": {
+          "type": "string"
+        },
+        "value": {
+          "description": "For type contains|equals|not_contains|not_equals",
+          "oneOf": [{ "type": "string" }, { "type": "number" }]
+        },
+        "parameters": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      },
+      "required": ["id", "type"],
+      "type": "object"
+    }
+  }
+}
+
