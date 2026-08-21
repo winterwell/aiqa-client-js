@@ -1,0 +1,9 @@
+{
+  // Publish build. Compiles only what is reachable from src/index.ts, rather than
+  // globbing src/**/*, so the unused parts of the vendored src/common tree (billing,
+  // subscriptions, account schemas, ...) are never emitted into the published package.
+  // See CLAUDE.md for why src/common is a full copy of aiqa/server/src/common.
+  "extends": "./tsconfig.json",
+  "include": [],
+  "files": ["src/index.ts"]
+}
