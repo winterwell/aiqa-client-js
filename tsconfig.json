@@ -7,12 +7,14 @@
     "outDir": "./dist",
     "rootDir": "./src",
     "strict": false,
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
     "resolveJsonModule": true
   },
-  "include": ["src/**/*", "test/example.ts"],
+  "include": ["src/**/*"],
   "exclude": ["node_modules", "dist"]
 }
-

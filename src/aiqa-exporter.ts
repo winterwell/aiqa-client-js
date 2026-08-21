@@ -339,7 +339,7 @@ export class AIQASpanExporter implements SpanExporter {
       headers: {
         'Content-Type': 'application/json',
         'Accept-Encoding': 'gzip, deflate, br', // Request compression (fetch handles decompression automatically)
-        'Authorization': `ApiKey ${this.apiKey}`,
+        'Authorization': `Bearer ${this.apiKey}`,
       },
       body: JSON.stringify(spans),
     });

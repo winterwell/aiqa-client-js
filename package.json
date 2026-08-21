@@ -1,18 +1,56 @@
 {
-  "name": "opentelemetry-es-example",
-  "version": "1.0.0",
-  "description": "OpenTelemetry tracing example with Elasticsearch",
-  "main": "dist/example.js",
+  "name": "aiqa-client",
+  "version": "0.9.1",
+  "description": "OpenTelemetry-based JS/TS client for tracing functions and sending traces to the AIQA server",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "license": "MIT",
+  "author": "AIQA <info@aiqa.dev>",
+  "homepage": "https://github.com/winterwell/aiqa-client-js",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/winterwell/aiqa-client-js.git"
+  },
+  "bugs": {
+    "url": "https://github.com/winterwell/aiqa-client-js/issues"
+  },
+  "keywords": [
+    "opentelemetry",
+    "tracing",
+    "observability",
+    "aiqa",
+    "monitoring",
+    "llm",
+    "genai",
+    "evals"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "changelog.md"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
   "scripts": {
-    "build": "tsc",
-    "start": "node dist/example.js",
-    "dev": "ts-node src/example.ts",
-    "test": "pnpm run build && tap test/**/*.ts"
+    "clean": "rm -rf dist",
+    "build": "npm run clean && tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "sync-types": "node scripts/sync-common-types.mjs",
+    "pretest": "node scripts/sync-common-types.mjs --check",
+    "test": "npm run build && tap test/**/*.ts",
+    "prepublishOnly": "npm run sync-types -- --check && npm run typecheck && npm run build"
+  },
+  "peerDependencies": {
+    "@opentelemetry/api": "^1.8.0"
   },
   "dependencies": {
-    "@elastic/elasticsearch": "^8.11.0",
-    "@opentelemetry/api": "^1.8.0",
-    "@opentelemetry/exporter-trace-otlp-http": "^0.48.0",
+    "@opentelemetry/core": "^1.30.0",
     "@opentelemetry/resources": "^1.24.0",
     "@opentelemetry/sdk-trace-base": "^1.24.0",
     "@opentelemetry/sdk-trace-node": "^1.24.0",
@@ -20,6 +58,7 @@
     "dotenv": "^16.6.1"
   },
   "devDependencies": {
+    "@opentelemetry/api": "^1.9.0",
     "@types/node": "^20.11.0",
     "tap": "^21.6.2",
     "ts-node": "^10.9.2",

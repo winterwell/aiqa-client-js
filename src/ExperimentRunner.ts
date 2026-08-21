@@ -3,10 +3,11 @@
  */
 
 import Example from './common/types/Example';
-import Dataset, { Metric } from './common/types/Dataset';
-import Experiment from './common/types/Experiment';
+import Dataset from './common/types/Dataset';
+import Metric from './common/types/Metric';
+import Experiment, { MetricStats } from './common/types/Experiment';
 
-interface ExperimentRunnerOptions {
+export interface ExperimentRunnerOptions {
 	datasetId: string;
 	/** usuallu unset, and a fresh experiment is created with a random ID */
 	experimentId?: string;
@@ -19,22 +20,8 @@ interface ExperimentRunnerOptions {
 	setEnvFromParameters?: boolean;
 }
 
-interface ScoreResult {
+export interface ScoreResult {
 	[metric: string]: any;
-}
-
-interface SummaryResult {
-	[metric: string]: any;
-}
-
-interface MetricStats {
-	mean: number;
-	min: number;
-	max: number;
-	var: number;
-	count: number;
-	// Internal state for Welford's algorithm
-	_sumSq: number; // sum of squared differences from mean
 }
 
 /**
@@ -50,7 +37,6 @@ export class ExperimentRunner {
 	private experimentId: string;
 	private experiment?: Experiment;
 	private scores: Array<{ example: Example; result: any; scores: ScoreResult }> = [];
-	private summaryResults: Record<string, MetricStats> = {};
 	private parallelism: number;
 	private setEnvFromParameters: boolean;
 
@@ -68,7 +54,7 @@ export class ExperimentRunner {
 		return {
 			'Content-Type': 'application/json',
 			'Accept-Encoding': 'gzip, deflate, br',
-			'Authorization': `ApiKey ${this.apiKey}`
+			'Authorization': `Bearer ${this.apiKey}`
 		};
 	}
 

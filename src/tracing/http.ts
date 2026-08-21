@@ -14,7 +14,7 @@ function buildApiHeaders(apiKey?: string): Record<string, string> {
 		'Accept-Encoding': 'gzip, deflate, br',
 	};
 	if (key) {
-		headers['Authorization'] = `ApiKey ${key}`;
+		headers['Authorization'] = `Bearer ${key}`;
 	}
 	return headers;
 }
@@ -32,7 +32,7 @@ export async function getSpan(spanId: string, organisationId?: string): Promise<
 	}
 	const response = await fetch(`${serverUrl}/span?${queryParams.toString()}`, { method: 'GET', headers: buildApiHeaders() });
 	if (response.status === 200) {
-		const result = await response.json();
+		const result: any = await response.json();
 		const hits = result.hits || [];
 		return hits.length > 0 ? hits[0] : undefined;
 	}

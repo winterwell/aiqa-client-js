@@ -1,6 +1,5 @@
 import * as dotenv from 'dotenv';
-import * as path from 'path';
-import { trace } from '@opentelemetry/api';
+import { trace, type Tracer } from '@opentelemetry/api';
 import { NodeTracerProvider } from '@opentelemetry/sdk-trace-node';
 import { BatchSpanProcessor, TraceIdRatioBasedSampler } from '@opentelemetry/sdk-trace-base';
 import { Resource } from '@opentelemetry/resources';
@@ -8,7 +7,11 @@ import { SEMRESATTRS_SERVICE_NAME } from '@opentelemetry/semantic-conventions';
 import { AIQASpanExporter } from '../aiqa-exporter';
 import { DEFAULT_AIQA_SERVER_URL, TRACER_NAME } from './constants';
 
-dotenv.config({ path: path.resolve(__dirname, '../.env') });
+// Load the host application's .env, if it has one. Resolved against the process
+// working directory, NOT __dirname: as an installed package __dirname points into
+// node_modules/aiqa-client, where there is no .env. Existing environment
+// variables always win, so this never clobbers config set by the host.
+dotenv.config();
 
 let samplingRate = 1.0;
 if (process.env.AIQA_SAMPLING_RATE) {
@@ -22,8 +25,13 @@ let componentTag: string = process.env.AIQA_COMPONENT_TAG || '';
 let initialized = false;
 let provider: NodeTracerProvider | null = null;
 let exporter: AIQASpanExporter | null = null;
-let tracer: trace.Tracer | null = null;
+let tracer: Tracer | null = null;
 let tracingEnabled = true;
+
+/** The service name reported on spans. Honours the standard OTel variable first. */
+function serviceName(): string {
+	return process.env.OTEL_SERVICE_NAME || process.env.AIQA_SERVICE_NAME || 'aiqa-client';
+}
 
 export function getAIQAClient(): void {
 	if (!initialized) {
@@ -55,7 +63,7 @@ export function ensureTracingInitialized(): void {
 	const isRealProvider = existingProvider && typeof (existingProvider as any).addSpanProcessor === 'function';
 	if (!isRealProvider) {
 		provider = new NodeTracerProvider({
-			resource: new Resource({ [SEMRESATTRS_SERVICE_NAME]: 'example-service' }),
+			resource: new Resource({ [SEMRESATTRS_SERVICE_NAME]: serviceName() }),
 			sampler: new TraceIdRatioBasedSampler(samplingRate),
 		});
 		provider.addSpanProcessor(new BatchSpanProcessor(exporter));
@@ -120,7 +128,7 @@ export function isTracingEnabled(): boolean {
 	return tracingEnabled;
 }
 
-export function getTracer(): trace.Tracer | null {
+export function getTracer(): Tracer | null {
 	ensureTracingInitialized();
 	return tracer;
 }

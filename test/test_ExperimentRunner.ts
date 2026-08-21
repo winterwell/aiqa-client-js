@@ -24,11 +24,12 @@ async function myEngine(input) {
 	}
 }
 
-tap.test('test_ExperimentRunner_stepwise_local', async t => {
-	if (!process.env.AIQA_API_KEY) {
-		t.comment('Warning: AIQA_API_KEY environment variable is not set. Test may fail.');
-	}
+// Integration test: needs credentials and a live AIQA server holding the dataset below.
+// Skipped rather than failed when unconfigured, so the suite is green on a fresh clone
+// and `npm run build && npm test` can gate a release. Set AIQA_API_KEY to run it.
+const skip = process.env.AIQA_API_KEY ? false : 'requires AIQA_API_KEY and a live AIQA server';
 
+tap.test('test_ExperimentRunner_stepwise_local', { skip }, async t => {
 	const datasetId = 'cef17877-4fbe-4b99-ba86-eb5221729274';
 	const organisationId = 'd876c206-8a4e-4da8-bed3-490478437101';
 	const options = {datasetId, organisationId};

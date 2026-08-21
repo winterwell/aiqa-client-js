@@ -1,4 +1,4 @@
-import Metric from './common/types/Dataset';
+import Metric from './common/types/Metric';
 import Example from './common/types/Example';
 
 /**
