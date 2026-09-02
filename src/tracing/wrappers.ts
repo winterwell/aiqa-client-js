@@ -1,6 +1,7 @@
 import { trace, context, SpanStatusCode } from '@opentelemetry/api';
-import { filterDataRecursive } from '../data-filters';
-import { ensureTracingInitialized, getTracer, getComponentTag, isTracingEnabled } from './runtime';
+import { ensureTracingInitialized, getTracer, isTracingEnabled } from './runtime';
+import { passesLocalSampling, startSpan, type SpanParent } from './spans';
+import { setSpanAttribute } from './span-helpers';
 import { prepareInputForSpan, prepareOutputForSpan, IgnorePatterns } from './filters';
 import { extractAndSetTokenUsage, extractAndSetProviderAndModel } from './llm-attrs';
 
@@ -10,6 +11,17 @@ export interface TracingOptions {
 	ignoreOutput?: IgnorePatterns;
 	filterInput?: (input: any) => any;
 	filterOutput?: (output: any) => any;
+	/**
+	 * Parent for the spans this wrapper creates. Omit to use the active context, which
+	 * is what you want on Node; in a browser or an MV3 service worker there is no
+	 * context manager, so pass the parent explicitly - or use `startSpan` directly.
+	 */
+	parent?: SpanParent;
+	/**
+	 * Sample calls to this function at the given rate, 0-1, independently of the global
+	 * `AIQA_SAMPLING_RATE`. Unsampled calls run untraced, with no span created.
+	 */
+	samplingRate?: number;
 }
 
 function isAsyncIterable(value: any): value is AsyncIterable<any> {
@@ -48,7 +60,7 @@ function setTimeToFirstOutputTokenIfNeeded(span: any, startedAtMs: number, alrea
 }
 
 export function withTracingAsync(fn: Function, options: TracingOptions = {}) {
-	const { name, ignoreInput, ignoreOutput, filterInput, filterOutput } = options;
+	const { name, ignoreInput, ignoreOutput, filterInput, filterOutput, parent, samplingRate } = options;
 	const fnName = name || fn.name || '_';
 	if ((fn as any)._isTraced) {
 		console.warn('AIQA: Function ' + fnName + ' is already traced, skipping tracing again');
@@ -57,18 +69,14 @@ export function withTracingAsync(fn: Function, options: TracingOptions = {}) {
 	const tracedFn = async (...args: any[]) => {
 		ensureTracingInitialized();
 		const tracer = getTracer();
-		if (!isTracingEnabled() || !tracer) {
+		if (!isTracingEnabled() || !tracer || !passesLocalSampling(samplingRate)) {
 			return await fn(...args);
 		}
-		const span = tracer.startSpan(fnName);
+		const span = startSpan(fnName, { parent });
 		const startedAtMs = Date.now();
-		const componentTag = getComponentTag();
-		if (componentTag) {
-			span.setAttribute('gen_ai.component.id', componentTag);
-		}
 		const input = prepareInputForSpan(args, filterInput, ignoreInput);
 		if (input != null) {
-			span.setAttribute('input', filterDataRecursive(input));
+			setSpanAttribute('input', input, span);
 		}
 		let spanOwnedByStream = false;
 		try {
@@ -89,7 +97,7 @@ export function withTracingAsync(fn: Function, options: TracingOptions = {}) {
 									if (step.done) {
 										extractAndSetTokenUsage(span, lastValue);
 										extractAndSetProviderAndModel(span, lastValue);
-										span.setAttribute('output', filterDataRecursive({ type: 'async_iterable', yielded_count: yieldedCount }));
+										setSpanAttribute('output', { type: 'async_iterable', yielded_count: yieldedCount }, span);
 										span.setStatus({ code: SpanStatusCode.OK });
 										span.end();
 										return step;
@@ -113,7 +121,7 @@ export function withTracingAsync(fn: Function, options: TracingOptions = {}) {
 			const output = prepareOutputForSpan(result, filterOutput, ignoreOutput);
 			extractAndSetTokenUsage(span, output);
 			extractAndSetProviderAndModel(span, output);
-			span.setAttribute('output', filterDataRecursive(output));
+			setSpanAttribute('output', output, span);
 			return result;
 		} catch (exception) {
 			const error = exception instanceof Error ? exception : new Error(String(exception));
@@ -131,7 +139,7 @@ export function withTracingAsync(fn: Function, options: TracingOptions = {}) {
 }
 
 export function withTracing(fn: Function, options: TracingOptions = {}) {
-	const { name, ignoreInput, ignoreOutput, filterInput, filterOutput } = options;
+	const { name, ignoreInput, ignoreOutput, filterInput, filterOutput, parent, samplingRate } = options;
 	const fnName = name || fn.name || '_';
 	if ((fn as any)._isTraced) {
 		console.warn('AIQA: Function ' + fnName + ' is already traced, skipping tracing again');
@@ -140,18 +148,14 @@ export function withTracing(fn: Function, options: TracingOptions = {}) {
 	const tracedFn = (...args: any[]) => {
 		ensureTracingInitialized();
 		const tracer = getTracer();
-		if (!isTracingEnabled() || !tracer) {
+		if (!isTracingEnabled() || !tracer || !passesLocalSampling(samplingRate)) {
 			return fn(...args);
 		}
-		const span = tracer.startSpan(fnName);
+		const span = startSpan(fnName, { parent });
 		const startedAtMs = Date.now();
-		const componentTag = getComponentTag();
-		if (componentTag) {
-			span.setAttribute('gen_ai.component.id', componentTag);
-		}
 		const input = prepareInputForSpan(args, filterInput, ignoreInput);
 		if (input != null) {
-			span.setAttribute('input', filterDataRecursive(input));
+			setSpanAttribute('input', input, span);
 		}
 		let spanOwnedByStream = false;
 		try {
@@ -172,7 +176,7 @@ export function withTracing(fn: Function, options: TracingOptions = {}) {
 									if (step.done) {
 										extractAndSetTokenUsage(span, lastValue);
 										extractAndSetProviderAndModel(span, lastValue);
-										span.setAttribute('output', filterDataRecursive({ type: 'iterable', yielded_count: yieldedCount }));
+										setSpanAttribute('output', { type: 'iterable', yielded_count: yieldedCount }, span);
 										span.setStatus({ code: SpanStatusCode.OK });
 										span.end();
 										return step;
@@ -196,7 +200,7 @@ export function withTracing(fn: Function, options: TracingOptions = {}) {
 			const output = prepareOutputForSpan(result, filterOutput, ignoreOutput);
 			extractAndSetTokenUsage(span, output);
 			extractAndSetProviderAndModel(span, output);
-			span.setAttribute('output', filterDataRecursive(output));
+			setSpanAttribute('output', output, span);
 			return result;
 		} catch (exception) {
 			const error = exception instanceof Error ? exception : new Error(String(exception));

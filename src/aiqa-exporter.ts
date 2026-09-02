@@ -1,11 +1,26 @@
 /**
- * OpenTelemetry span exporter that sends spans to the AIQA server API.
+ * OpenTelemetry span exporter that sends spans to the AIQA server's OTLP endpoint
+ * (`POST /v1/traces`, JSON encoding - see otlp-json.ts for why we serialise it here
+ * rather than using OpenTelemetry's OTLP exporter).
  * Buffers spans and flushes them periodically or on shutdown. Thread-safe.
  */
 
 import { ReadableSpan, SpanExporter } from '@opentelemetry/sdk-trace-base';
 import { ExportResult, ExportResultCode } from '@opentelemetry/core';
 import { filterDataRecursive } from './data-filters';
+import { getConfig } from './tracing/config';
+import { toOtlpTraceRequest } from './otlp-json';
+
+/** OTLP/HTTP trace ingest, the server's only span-upload route. */
+const OTLP_TRACES_PATH = '/v1/traces';
+
+/** Settings that can be changed on a running exporter - see {@link AIQASpanExporter.configure}. */
+export interface AIQASpanExporterOptions {
+  serverUrl?: string;
+  apiKey?: string;
+  /** Auto-flush interval. 0 or less turns the timer off, leaving flushing to the caller. */
+  flushIntervalSeconds?: number;
+}
 
 interface SerializableSpan {
   name: string;
@@ -38,7 +53,8 @@ interface SerializableSpan {
   traceFlags: number;
   duration?: number;
   ended: boolean;
-  instrumentationLibrary: {
+  /** Named for the 1.x field; carries 2.x's `instrumentationScope` unchanged. */
+  instrumentationLibrary?: {
     name: string;
     version?: string;
   };
@@ -56,19 +72,47 @@ export class AIQASpanExporter implements SpanExporter {
   private maxBufferSpans: number = 10000; // Maximum spans to buffer (prevents unbounded growth)
   private buffer: SerializableSpan[] = [];
   private bufferSpanKeys: Set<string> = new Set(); // Track (trace_id, id) tuples to prevent duplicates
-  private flushTimer?: NodeJS.Timeout;
+  private flushTimer?: ReturnType<typeof setInterval>;
   private flushLock: Promise<void> = Promise.resolve();
   private shutdownRequested: boolean = false;
 
-  constructor(
-    serverUrl: string = process.env.AIQA_SERVER_URL || 'https://server-aiqa.winterwell.com',
-    apiKey: string = process.env.AIQA_API_KEY || '',
-    flushIntervalSeconds: number = 5
-  ) {
-    this.serverUrl = serverUrl.replace(/\/$/, ''); // Remove trailing slash
-    this.apiKey = apiKey;
-    this.flushIntervalMs = flushIntervalSeconds * 1000;
+  /**
+   * Anything omitted falls back to the resolved client config (see tracing/config.ts),
+   * which is the single place the `AIQA_*` env vars and `initTracing` overrides are read.
+   * The tracing runtime always passes all three; the defaults are for callers wiring the
+   * exporter into their own TracerProvider.
+   */
+  constructor(serverUrl?: string, apiKey?: string, flushIntervalSeconds?: number) {
+    const config = getConfig();
+    this.serverUrl = (serverUrl ?? config.serverUrl).replace(/\/$/, ''); // Remove trailing slash
+    this.apiKey = apiKey ?? config.apiKey;
+    this.flushIntervalMs = (flushIntervalSeconds ?? config.flushIntervalSeconds) * 1000;
     this.startAutoFlush();
+  }
+
+  /**
+   * Update credentials, endpoint or flush interval on a running exporter.
+   *
+   * Reconfiguring beats replacing the exporter: a span processor cannot be detached
+   * from a TracerProvider, so a replacement would leave the old exporter wired in.
+   * Buffered spans are kept and sent with the new settings.
+   */
+  configure(options: AIQASpanExporterOptions): void {
+    if (options.serverUrl !== undefined) {
+      this.serverUrl = options.serverUrl.replace(/\/$/, '');
+    }
+    if (options.apiKey !== undefined) {
+      this.apiKey = options.apiKey;
+    }
+    if (options.flushIntervalSeconds !== undefined) {
+      const intervalMs = options.flushIntervalSeconds * 1000;
+      if (intervalMs !== this.flushIntervalMs) {
+        this.flushIntervalMs = intervalMs;
+        if (!this.shutdownRequested) {
+          this.startAutoFlush();
+        }
+      }
+    }
   }
 
   export(spans: ReadableSpan[], resultCallback: (result: ExportResult) => void): void {
@@ -134,6 +178,26 @@ export class AIQASpanExporter implements SpanExporter {
   }
 
   /**
+   * The parent span id, from either OpenTelemetry SDK generation.
+   *
+   * 1.x has `parentSpanId: string`; 2.x replaced it with
+   * `parentSpanContext?: SpanContext`. Reading only one shape silently produced
+   * `parent_span_id: undefined` against the other, which flattens the trace tree on the
+   * server - and the exporter does not control which SDK it is attached to, since it can
+   * be wired into a provider the host application registered.
+   */
+  private parentSpanId(span: ReadableSpan): string | undefined {
+    const asAny = span as any;
+    return asAny.parentSpanContext?.spanId ?? asAny.parentSpanId;
+  }
+
+  /** Likewise `instrumentationLibrary` (1.x) vs `instrumentationScope` (2.x). */
+  private instrumentationScope(span: ReadableSpan): { name: string; version?: string } | undefined {
+    const asAny = span as any;
+    return asAny.instrumentationScope ?? asAny.instrumentationLibrary;
+  }
+
+  /**
    * Convert ReadableSpan to a serializable format
    */
   private serializeSpan(span: ReadableSpan): SerializableSpan {
@@ -145,7 +209,7 @@ export class AIQASpanExporter implements SpanExporter {
     return {
       name: span.name,
       kind: span.kind,
-      parent_span_id: span.parentSpanId,
+      parent_span_id: this.parentSpanId(span),
       start_time: startTime,
       end_time: endTime,
       status: {
@@ -173,7 +237,7 @@ export class AIQASpanExporter implements SpanExporter {
       traceFlags: spanContext.traceFlags,
       duration,
       ended: span.ended,
-      instrumentationLibrary: span.instrumentationLibrary,
+      instrumentationLibrary: this.instrumentationScope(span),
     };
   }
 
@@ -214,6 +278,14 @@ export class AIQASpanExporter implements SpanExporter {
       if (!this.serverUrl) {
         console.warn(`AIQA: Skipping flush: AIQA_SERVER_URL is not set. ${spansToFlush.length} span(s) will not be sent.`);
         // Clear keys for spans that won't be sent
+        this.removeSpanKeysFromTracking(spansToFlush);
+        return;
+      }
+
+      // Without an API key the server will reject every batch, so drop rather than
+      // retry for ever. This is the state after tracing is disabled at runtime.
+      if (!this.apiKey) {
+        console.warn(`AIQA: Skipping flush: no API key. ${spansToFlush.length} span(s) will not be sent.`);
         this.removeSpanKeysFromTracking(spansToFlush);
         return;
       }
@@ -327,21 +399,20 @@ export class AIQASpanExporter implements SpanExporter {
   }
 
   /**
-   * Send spans to the server API
+   * Send spans to the server's OTLP ingest endpoint.
    */
   private async sendSpans(spans: SerializableSpan[]): Promise<void> {
     if (!this.serverUrl) {
       throw new Error('AIQA_SERVER_URL is not set. Cannot send spans to server.');
     }
 
-    const response = await fetch(`${this.serverUrl}/span`, {
+    const response = await fetch(`${this.serverUrl}${OTLP_TRACES_PATH}`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Accept-Encoding': 'gzip, deflate, br', // Request compression (fetch handles decompression automatically)
         'Authorization': `Bearer ${this.apiKey}`,
       },
-      body: JSON.stringify(spans),
+      body: JSON.stringify(toOtlpTraceRequest(spans)),
     });
 
     if (!response.ok) {
@@ -351,11 +422,17 @@ export class AIQASpanExporter implements SpanExporter {
   }
 
   /**
-   * Start the auto-flush timer
+   * Start the auto-flush timer. A flush interval of 0 or less turns it off, which is
+   * what you want where a timer cannot be relied on anyway - an MV3 service worker can
+   * be suspended at any point, so flush explicitly at the end of each unit of work.
    */
   private startAutoFlush(): void {
     if (this.flushTimer) {
       clearInterval(this.flushTimer);
+      this.flushTimer = undefined;
+    }
+    if (this.flushIntervalMs <= 0) {
+      return;
     }
 
     this.flushTimer = setInterval(() => {
@@ -366,10 +443,12 @@ export class AIQASpanExporter implements SpanExporter {
       }
     }, this.flushIntervalMs);
     
-    // Unref the timer so it doesn't prevent process exit
-    // This allows the exporter to work as a daemon that won't block normal exit
-    if (this.flushTimer && typeof this.flushTimer.unref === 'function') {
-      this.flushTimer.unref();
+    // Unref the timer so it doesn't prevent process exit. This allows the exporter to
+    // work as a daemon that won't block normal exit. Browsers return a number from
+    // setInterval, hence the typeof guard.
+    const timer = this.flushTimer as any;
+    if (timer && typeof timer.unref === 'function') {
+      timer.unref();
     }
   }
 

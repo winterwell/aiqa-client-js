@@ -21,7 +21,8 @@ propagation). npm 7+ installs it for you; with pnpm or an older npm, add it expl
 npm install @opentelemetry/api
 ```
 
-Requires Node 18 or newer.
+Requires Node 18 or newer. For browsers, web workers and Chrome MV3 extensions, see
+[Browsers and MV3 extensions](#browsers-and-mv3-extensions).
 
 ## Configure
 
@@ -38,6 +39,29 @@ Set these in the environment, or in a `.env` file in your project root (see
 | `OTEL_SERVICE_NAME` | Service name reported on spans. Falls back to `AIQA_SERVICE_NAME`, then `aiqa-client`. |
 
 Tracing initialises lazily on first use, so importing the package is cheap and safe.
+
+Or configure it in code, which is the only option where there is no environment to read
+- a browser, or an extension reading its settings from `chrome.storage`:
+
+```typescript
+import { initTracing } from 'aiqa-client';
+
+initTracing({
+  apiKey,                    // required for tracing to be enabled
+  serverUrl,                 // default https://server-aiqa.winterwell.com
+  organisationId,
+  componentTag: 'myext.worker',
+  samplingRate: 0.25,
+  serviceName: 'my-service',
+  flushIntervalSeconds: 5,   // 0 turns the auto-flush timer off
+});
+```
+
+Anything omitted keeps its previous value, falling back to the environment, so
+`initTracing({ apiKey })` on its own is fine. Call it again whenever the config changes
+- after the user edits their API key, say. Changing the key, server URL or flush
+interval updates the running exporter in place; changing `samplingRate` or `serviceName`
+rebuilds the tracer provider.
 
 ## Basic tracing
 
@@ -59,6 +83,44 @@ await flushSpans();
 Streaming results are handled: if a wrapped function returns an iterable or async
 iterable, the span stays open until the stream is exhausted, and
 `gen_ai.server.time_to_first_output_token` is recorded when the first chunk is emitted.
+
+Inputs and outputs are recorded as JSON when they are not something OpenTelemetry can
+store directly, and the data filters (`AIQA_DATA_FILTERS`) run over them first, so
+passwords, JWTs, auth headers and API keys are redacted.
+
+## Spans with an explicit parent
+
+`withTracing` nests spans through the OpenTelemetry context, which needs a context
+manager that survives `await`. Node has one; a browser and an MV3 service worker do not,
+so there `context.active()` never holds the current span and implicit nesting silently
+gives you a flat trace of orphans. Pass the parent yourself instead:
+
+```typescript
+import { startSpan, flushSpans } from 'aiqa-client';
+
+const page = startSpan('analyse_page', { attributes: { url } });
+const chunks = startSpan('chunk_page', { parent: page, startTime: chunkedAt });
+chunks.end();
+const answer = startSpan('call_model', { parent: page });
+answer.end();
+page.end();
+await flushSpans();
+```
+
+`startSpan(name, options)` always returns a span - a non-recording one if tracing is
+disabled or the span was sampled out - so there is nothing to null-check. Options:
+
+| Option | Description |
+| --- | --- |
+| `parent` | A span, a `SpanContext`, or a whole `Context`. Omit to use the active context; `null` starts a new trace. |
+| `attributes` | Attributes to set on the span, run through the data filters. |
+| `startTime` | Span start time. Lets you replay work that was timed elsewhere - in a content script, say. |
+| `kind`, `links`, `root` | Passed through to OpenTelemetry. |
+| `samplingRate` | Sample this call site at `0`-`1`, independently of `AIQA_SAMPLING_RATE`. Dropping a span drops any span created with it as an explicit `parent`. |
+
+`setSpanAttribute`, `setConversationId`, `setTokenUsage`, `setProviderAndModel`,
+`getTraceId` and `getSpanId` all take an optional span as their last argument, for the
+same reason - without it they annotate the active span, and there isn't one.
 
 ## Grouping traces by conversation
 
@@ -109,6 +171,56 @@ const spanId = getSpanId();    // 16-char hex, or undefined
 const span = createSpanFromTraceId(traceId, parentSpanId, 'service_b_operation');
 ```
 
+## Browsers and MV3 extensions
+
+```typescript
+import { initTracing, startSpan, flushSpans } from 'aiqa-client/browser';
+```
+
+`import 'aiqa-client'` also works: bundlers targeting the browser resolve it to the same
+place through the `browser` condition in the package's `exports` map. The browser build
+reaches no Node built-ins, so it bundles with `esbuild --platform=browser` and friends -
+no `dotenv` (and so no `fs`/`os`/`crypto`), and no `@opentelemetry/sdk-trace-node` (and
+so no `async_hooks`/`events`).
+
+Three things to know:
+
+- **Configure it in code.** There is no `.env` and no `process.env`, so call
+  `initTracing({ apiKey, ... })` - from `chrome.storage.sync`, typically. Nothing is
+  traced until it has an API key.
+- **Pass parents explicitly.** The provider is a `BasicTracerProvider` with no context
+  manager, so use `startSpan(name, { parent })` rather than relying on `withTracing`'s
+  implicit nesting. See [Spans with an explicit parent](#spans-with-an-explicit-parent).
+- **Flush before you can be suspended.** An MV3 service worker can stop at any point, so
+  `await flushSpans()` at the end of each unit of work rather than trusting the
+  auto-flush timer. `flushSpans()` is cheap to call often and never throws;
+  `initTracing({ flushIntervalSeconds: 0 })` turns the timer off entirely.
+
+```typescript
+const { apiKey, serverUrl } = await chrome.storage.sync.get(['apiKey', 'serverUrl']);
+initTracing({ apiKey, serverUrl, componentTag: 'myext.worker', flushIntervalSeconds: 0 });
+
+async function analysePage(url: string, chunkedAt: number) {
+  const page = startSpan('analyse_page', { attributes: { url } });
+  try {
+    // timed in the content script, replayed here
+    startSpan('chunk_page', { parent: page, startTime: chunkedAt }).end();
+    const model = startSpan('call_model', { parent: page });
+    try {
+      return await callTheModel(url);
+    } finally {
+      model.end();
+    }
+  } finally {
+    page.end();
+    await flushSpans();
+  }
+}
+```
+
+`AIQASpanExporter` is exported from both entry points, if you would rather drive your own
+`TracerProvider`.
+
 ## Experiments
 
 Run a dataset of examples through your code and score the outputs:
@@ -132,22 +244,29 @@ runner does not mutate process-wide env vars while running examples; opt in with
 
 ## Other exports
 
+- `initTracing` - configure and start tracing in code, instead of from the environment
+- `startSpan` - a span with an explicit parent, attributes and start time
 - `submitFeedback` - attach user feedback to a trace
 - `getSpan`, `getOrganisation`, `getAPIKeyInfo` - AIQA server lookups
 - `scoreMetric`, `scoreAllMetrics` - score metrics locally
 - `AIQASpanExporter` - the raw exporter, for wiring up your own OpenTelemetry provider
-- `shutdownTracing`, `isTracingEnabled`, `getProvider`, `getExporter`
+- `shutdownTracing`, `isTracingEnabled`, `getProvider`, `getExporter`, `getTracingConfig`
 - Types: `Example`, `Dataset`, `Metric`, `Experiment`, `Span`, `MetricStats`,
-  `TracingOptions`, `ExperimentRunnerOptions`, `ScoreResult`
+  `TracingOptions`, `StartSpanOptions`, `SpanParent`, `InitTracingOptions`, `AIQAConfig`,
+  `ExperimentRunnerOptions`, `ScoreResult`, `AIQASpanExporterOptions`
 
 ## Development
 
 ```bash
 npm install
-npm run build          # compile to dist/ (entry point: src/index.ts)
+npm run build          # compile to dist/ (entry points: src/index.ts, src/browser.ts)
 npm run typecheck      # typecheck everything, including src/common
 npm test               # build, then run the tap tests
 ```
+
+`test/test_browser_entry.ts` bundles the browser entry point with esbuild and runs it in
+a `vm` sandbox with no `process`, which is what stops a Node-only import creeping back
+into the browser build.
 
 ### `src/common` is generated - do not edit it
 

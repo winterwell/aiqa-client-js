@@ -3,12 +3,14 @@
  * Shared by tracing.ts and aiqa-exporter.ts to avoid code duplication.
  */
 
+import { getEnvVar } from './env';
+
 /**
  * Get enabled filters from AIQA_DATA_FILTERS env var
  * Default: "RemovePasswords, RemoveJWT, RemoveAuthHeaders, RemoveAPIKeys" (matching Python/Go)
  */
 export function getEnabledFilters(): Set<string> {
-	const filtersEnv = process.env.AIQA_DATA_FILTERS || "RemovePasswords, RemoveJWT, RemoveAuthHeaders, RemoveAPIKeys";
+	const filtersEnv = getEnvVar('AIQA_DATA_FILTERS') || "RemovePasswords, RemoveJWT, RemoveAuthHeaders, RemoveAPIKeys";
 	if (!filtersEnv) {
 		return new Set();
 	}
@@ -42,15 +44,18 @@ export function isAPIKey(value: any): boolean {
 }
 
 /**
- * Apply data filters to a key-value pair
+ * Apply data filters to a key-value pair.
+ *
+ * `enabledFilters` defaults to reading the environment, which re-parses
+ * `AIQA_DATA_FILTERS` and allocates a Set on every call. Callers walking a structure
+ * should resolve it once and pass it in - see `filterDataRecursive`.
  */
-export function applyDataFilters(key: string, value: any): any {
+export function applyDataFilters(key: string, value: any, enabledFilters: Set<string> = getEnabledFilters()): any {
 	// Don't filter falsy values
 	if (!value) {
 		return value;
 	}
 	
-	const enabledFilters = getEnabledFilters();
 	const keyLower = key.toLowerCase();
 	
 	// RemovePasswords filter: if key contains "password", replace value with "****"
@@ -88,23 +93,43 @@ export function applyDataFilters(key: string, value: any): any {
  * Recursively apply data filters to nested structures
  */
 export function filterDataRecursive(data: any): any {
+	// Resolve the enabled filters once per walk rather than once per key: a traced
+	// function's input can be thousands of keys, and each one used to re-read and re-parse
+	// the env var and build a fresh Set.
+	return filterDataRecursiveInner(data, new WeakSet<object>(), getEnabledFilters());
+}
+
+/**
+ * `seen` guards against cycles. Without it a self-referencing object - a DOM node, an
+ * error with a cause chain, a request holding its own response - overflowed the stack,
+ * which threw out of `setSpanAttribute` and into the caller's own code rather than just
+ * losing an attribute.
+ */
+function filterDataRecursiveInner(data: any, seen: WeakSet<object>, enabledFilters: Set<string>): any {
 	if (data == null) {
 		return data;
 	}
-	
-	if (Array.isArray(data)) {
-		return data.map(item => filterDataRecursive(item));
-	}
-	
-	if (typeof data === 'object') {
-		const result: any = {};
-		for (const [k, v] of Object.entries(data)) {
-			const filteredValue = applyDataFilters(k, v);
-			result[k] = filterDataRecursive(filteredValue);
-		}
-		return result;
-	}
-	
-	return applyDataFilters('', data);
-}
 
+	if (typeof data === 'object') {
+		if (seen.has(data)) {
+			return '[Circular]';
+		}
+		seen.add(data);
+		try {
+			if (Array.isArray(data)) {
+				return data.map(item => filterDataRecursiveInner(item, seen, enabledFilters));
+			}
+			const result: any = {};
+			for (const [k, v] of Object.entries(data)) {
+				const filteredValue = applyDataFilters(k, v, enabledFilters);
+				result[k] = filterDataRecursiveInner(filteredValue, seen, enabledFilters);
+			}
+			return result;
+		} finally {
+			// Siblings that share a value are not cycles, so let them through.
+			seen.delete(data);
+		}
+	}
+
+	return applyDataFilters('', data, enabledFilters);
+}

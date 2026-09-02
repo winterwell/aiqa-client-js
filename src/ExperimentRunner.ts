@@ -2,6 +2,8 @@
  * ExperimentRunner - runs experiments on datasets and scores results
  */
 
+import { getEnvVar, hasProcessEnv } from './env';
+import { getConfig } from './tracing/config';
 import Example from './common/types/Example';
 import Dataset from './common/types/Dataset';
 import Metric from './common/types/Metric';
@@ -43,9 +45,10 @@ export class ExperimentRunner {
 	constructor(options: ExperimentRunnerOptions) {
 		this.datasetId = options.datasetId;
 		this.experimentId = options.experimentId;
-		this.serverUrl = (options.serverUrl || process.env.AIQA_SERVER_URL || 'https://server-aiqa.winterwell.com').replace(/\/$/, '');
-		this.apiKey = options.apiKey || process.env.AIQA_API_KEY || '';
-		this.organisation = options.organisationId;
+		const config = getConfig();
+		this.serverUrl = (options.serverUrl || config.serverUrl).replace(/\/$/, '');
+		this.apiKey = options.apiKey || config.apiKey;
+		this.organisation = options.organisationId || config.organisationId || undefined;
 		this.parallelism = Math.max(1, Number(options.parallelism || 1));
 		this.setEnvFromParameters = options.setEnvFromParameters === true;
 	}
@@ -198,11 +201,17 @@ export class ExperimentRunner {
 		}
 		console.log('AIQA: Running with parameters:', parametersHere);
 		const originalEnvValues: Record<string, string | undefined> = {};
-		if (this.setEnvFromParameters) {
+		// There is no process.env in a browser or a service worker, so this is opt-in
+		// and skipped where it cannot work.
+		const setEnv = this.setEnvFromParameters && hasProcessEnv();
+		if (this.setEnvFromParameters && !setEnv) {
+			console.warn('AIQA: setEnvFromParameters was requested but there is no process.env on this runtime; ignoring.');
+		}
+		if (setEnv) {
 			for (const [key, value] of Object.entries(parametersHere)) {
 				if (value != null) {
-					originalEnvValues[key] = process.env[key];
-					process.env[key] = String(value);
+					originalEnvValues[key] = getEnvVar(key);
+					(globalThis as any).process.env[key] = String(value);
 				}
 			}
 		}
@@ -219,12 +228,13 @@ export class ExperimentRunner {
 			console.log('AIQA: scoreAndStore returned:', result);
 			return result;
 		} finally {
-			if (this.setEnvFromParameters) {
+			if (setEnv) {
+				const env = (globalThis as any).process.env;
 				for (const [key, originalValue] of Object.entries(originalEnvValues)) {
 					if (originalValue == null) {
-						delete process.env[key];
+						delete env[key];
 					} else {
-						process.env[key] = originalValue;
+						env[key] = originalValue;
 					}
 				}
 			}

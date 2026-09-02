@@ -1,32 +1,17 @@
 /**
- * Public tracing facade.
- * Internal implementation is split into focused modules for DRY/KISS maintainability.
+ * Public tracing facade for Node.
+ *
+ * Same surface as src/tracing/facade.ts, plus the Node platform setup (.env loading and
+ * NodeTracerProvider, which installs the async-hooks context manager that `withTracing`
+ * needs for implicit span nesting). Browser callers want `aiqa-client/browser` instead -
+ * see src/browser.ts.
+ *
+ * This module exists for the `aiqa-client/dist/tracing.js` deep-import path only; new
+ * code should import from the package root. The `.js` is required: package.json's
+ * `exports` map passes `./dist/*` through, but `exports` patterns do no extension
+ * probing, so `aiqa-client/dist/tracing` no longer resolves.
  */
 
-export {
-	getAIQAClient,
-	flushSpans,
-	shutdownTracing,
-	getProvider,
-	getExporter,
-	isTracingEnabled,
-} from './tracing/runtime';
+import './platform/node';
 
-export { withTracing, withTracingAsync } from './tracing/wrappers';
-export type { TracingOptions } from './tracing/wrappers';
-
-export {
-	setSpanAttribute,
-	getActiveSpan,
-	setConversationId,
-	setTokenUsage,
-	setProviderAndModel,
-	setComponentTag,
-	getTraceId,
-	getSpanId,
-	createSpanFromTraceId,
-	injectTraceContext,
-	extractTraceContext,
-} from './tracing/span-helpers';
-
-export { getSpan, submitFeedback, getOrganisation, getAPIKeyInfo } from './tracing/http';
+export * from './tracing/facade';

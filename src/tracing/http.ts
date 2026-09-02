@@ -1,14 +1,15 @@
 import { context, trace } from '@opentelemetry/api';
-import { DEFAULT_AIQA_SERVER_URL, GEN_AI_OPERATION_NAME } from './constants';
+import { GEN_AI_OPERATION_NAME } from './constants';
+import { getConfig } from './config';
 import { createSpanFromTraceId } from './span-helpers';
 import { flushSpans } from './runtime';
 
 function resolveServerUrl(serverUrl?: string): string {
-	return (serverUrl || process.env.AIQA_SERVER_URL || DEFAULT_AIQA_SERVER_URL).replace(/\/$/, '');
+	return (serverUrl || getConfig().serverUrl).replace(/\/$/, '');
 }
 
 function buildApiHeaders(apiKey?: string): Record<string, string> {
-	const key = apiKey || process.env.AIQA_API_KEY || '';
+	const key = apiKey || getConfig().apiKey;
 	const headers: Record<string, string> = {
 		'Content-Type': 'application/json',
 		'Accept-Encoding': 'gzip, deflate, br',
@@ -21,7 +22,7 @@ function buildApiHeaders(apiKey?: string): Record<string, string> {
 
 export async function getSpan(spanId: string, organisationId?: string): Promise<any | undefined> {
 	const serverUrl = resolveServerUrl();
-	const orgId = organisationId || process.env.AIQA_ORGANISATION_ID || '';
+	const orgId = organisationId || getConfig().organisationId;
 	if (!serverUrl) {
 		console.warn('AIQA: AIQA_SERVER_URL is not set. Cannot retrieve span.');
 		return undefined;

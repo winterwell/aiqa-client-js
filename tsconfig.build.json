@@ -1,9 +1,14 @@
 {
-  // Publish build. Compiles only what is reachable from src/index.ts, rather than
+  // Publish build. Compiles only what is reachable from the entry points, rather than
   // globbing src/**/*, so the unused parts of the vendored src/common tree (billing,
   // subscriptions, account schemas, ...) are never emitted into the published package.
   // See CLAUDE.md for why src/common is a full copy of aiqa/server/src/common.
+  //
+  // src/index.ts is the Node entry point and src/browser.ts the browser one; both are
+  // listed so both get compiled and get their own .d.ts. src/tracing.ts is reachable from
+  // neither - it exists for the `aiqa-client/dist/tracing.js` deep-import path, which the
+  // exports map still allows - so it is listed too.
   "extends": "./tsconfig.json",
   "include": [],
-  "files": ["src/index.ts"]
+  "files": ["src/index.ts", "src/browser.ts", "src/tracing.ts"]
 }

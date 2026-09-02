@@ -4,6 +4,25 @@
   "description": "OpenTelemetry-based JS/TS client for tracing functions and sending traces to the AIQA server",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "browser": "dist/browser.js",
+  "exports": {
+    ".": {
+      "browser": {
+        "types": "./dist/browser.d.ts",
+        "default": "./dist/browser.js"
+      },
+      "default": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      }
+    },
+    "./browser": {
+      "types": "./dist/browser.d.ts",
+      "default": "./dist/browser.js"
+    },
+    "./dist/*": "./dist/*",
+    "./package.json": "./package.json"
+  },
   "license": "MIT",
   "author": "AIQA <info@aiqa.dev>",
   "homepage": "https://github.com/winterwell/aiqa-client-js",
@@ -43,7 +62,7 @@
     "typecheck": "tsc --noEmit",
     "sync-types": "node scripts/sync-common-types.mjs",
     "pretest": "node scripts/sync-common-types.mjs --check",
-    "test": "npm run build && tap test/**/*.ts",
+    "test": "npm run build && tap \"test/test_*.ts\"",
     "prepublishOnly": "npm run sync-types -- --check && npm run typecheck && npm run build"
   },
   "peerDependencies": {
@@ -51,15 +70,15 @@
   },
   "dependencies": {
     "@opentelemetry/core": "^1.30.0",
-    "@opentelemetry/resources": "^1.24.0",
-    "@opentelemetry/sdk-trace-base": "^1.24.0",
-    "@opentelemetry/sdk-trace-node": "^1.24.0",
-    "@opentelemetry/semantic-conventions": "^1.24.0",
+    "@opentelemetry/resources": "^1.30.0",
+    "@opentelemetry/sdk-trace-base": "^1.30.0",
+    "@opentelemetry/sdk-trace-node": "^1.30.0",
     "dotenv": "^16.6.1"
   },
   "devDependencies": {
     "@opentelemetry/api": "^1.9.0",
     "@types/node": "^20.11.0",
+    "esbuild": "^0.25.12",
     "tap": "^21.6.2",
     "ts-node": "^10.9.2",
     "typescript": "^5.3.3"
