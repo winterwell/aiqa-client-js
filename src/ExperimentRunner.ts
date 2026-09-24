@@ -2,29 +2,37 @@
  * ExperimentRunner - runs experiments on datasets and scores results
  */
 
+import { context, trace, SpanStatusCode } from '@opentelemetry/api';
 import { getEnvVar, hasProcessEnv } from './env';
 import { getConfig } from './tracing/config';
+import { requestJson } from './tracing/http';
+import { flushSpans } from './tracing/runtime';
+import { startSpan } from './tracing/spans';
+import { getTraceId, setSpanAttribute } from './tracing/span-helpers';
+import { AIQA_EXAMPLE_ID, AIQA_EXPERIMENT_ID } from './common/constants_otel';
 import Example from './common/types/Example';
 import Dataset from './common/types/Dataset';
-import Metric from './common/types/Metric';
 import Experiment, { MetricStats } from './common/types/Experiment';
 
 export interface ExperimentRunnerOptions {
 	datasetId: string;
-	/** usuallu unset, and a fresh experiment is created with a random ID */
+	/** Usually unset, and a fresh experiment is created. Set it to add results to an existing experiment. */
 	experimentId?: string;
 	serverUrl?: string;
 	apiKey?: string;
 	organisationId?: string;
 	/** max concurrent examples to run; default 1 */
 	parallelism?: number;
-	/** avoid process-wide env side effects when running examples */
+	/** Set each experiment parameter as an env var while an example runs. Off by default, as it is process-wide. */
 	setEnvFromParameters?: boolean;
 }
 
 export interface ScoreResult {
 	[metric: string]: any;
 }
+
+type Engine = (input: any, parameters: Record<string, any>) => any | Promise<any>;
+type Scorer = (output: any, example: Example, parameters: Record<string, any>) => Promise<Record<string, number>>;
 
 /**
  * The ExperimentRunner is the main class for running experiments on datasets.
@@ -36,9 +44,10 @@ export class ExperimentRunner {
 	private serverUrl: string;
 	private apiKey: string;
 	private organisation?: string;
-	private experimentId: string;
+	private experimentId?: string;
 	private experiment?: Experiment;
-	private scores: Array<{ example: Example; result: any; scores: ScoreResult }> = [];
+	/** In-flight fetch/create, shared so parallel workers do not each create an experiment. */
+	private pendingExperiment?: Promise<Experiment>;
 	private parallelism: number;
 	private setEnvFromParameters: boolean;
 
@@ -53,32 +62,15 @@ export class ExperimentRunner {
 		this.setEnvFromParameters = options.setEnvFromParameters === true;
 	}
 
-	private getHeaders(): Record<string, string> {
-		return {
-			'Content-Type': 'application/json',
-			'Accept-Encoding': 'gzip, deflate, br',
-			'Authorization': `Bearer ${this.apiKey}`
-		};
-	}
-
-	private async requestJson<T>(path: string, method: 'GET' | 'POST', body?: any): Promise<T> {
-		const response = await fetch(`${this.serverUrl}${path}`, {
-			method,
-			headers: this.getHeaders(),
-			body: body == null ? undefined : JSON.stringify(body),
-		});
-		if (!response.ok) {
-			const errorText = await response.text().catch(() => 'Unknown error');
-			throw new Error(`Request failed ${method} ${path}: ${response.status} ${response.statusText} - ${errorText}`);
-		}
-		return await response.json() as T;
+	private request<T>(path: string, method: 'GET' | 'POST' = 'GET', body?: any): Promise<T> {
+		return requestJson<T>(path, { method, body, serverUrl: this.serverUrl, apiKey: this.apiKey });
 	}
 
 	/**
 	 * Fetch the dataset to get its metrics
 	 */
 	async getDataset(): Promise<Dataset> {
-		return this.requestJson<Dataset>(`/dataset/${this.datasetId}`, 'GET');
+		return this.request<Dataset>(`/dataset/${this.datasetId}`);
 	}
 
 	/**
@@ -92,109 +84,98 @@ export class ExperimentRunner {
 		}
 		params.append('limit', limit.toString()); // Fetch big - probably all the examples
 
-		const data = await this.requestJson<{ hits?: Example[]; total?: number; limit?: number; offset?: number }>(
-			`/example?${params.toString()}`,
-			'GET'
+		const data = await this.request<{ hits?: Example[]; total?: number; limit?: number; offset?: number }>(
+			`/example?${params.toString()}`
 		);
 		return data.hits || [];
 	}
 
 	/**
-	 * Create an experiment if one does not exist.
-	 * @param experiment - optional setup for the experiment object. You may wish to set: 
+	 * Create a new experiment on the server, and use it for subsequent results.
+	 * @param experimentSetup - optional setup for the experiment object. You may wish to set:
 	 * - name (recommended for labelling the experiment)
 	 * - parameters
 	 * @returns the created experiment object
 	 */
-	async createExperiment(experimentSetup?: Partial<Experiment>): Promise<Experiment> {
+	async createExperiment(experimentSetup: Partial<Experiment> = {}): Promise<Experiment> {
 		if (!this.organisation || !this.datasetId) {
 			throw new Error('Organisation and dataset ID are required to create an experiment');
 		}
-		if (!experimentSetup) {
-			experimentSetup = {} as Partial<Experiment>;
-		}
-		// fill in if not set
-		experimentSetup = {
+		console.log('AIQA: Creating experiment');
+		const experiment = await this.request<Experiment>(`/experiment`, 'POST', {
 			...experimentSetup,
 			organisation: this.organisation,
 			dataset: this.datasetId,
 			results: [],
 			summaries: {},
-		};
-		console.log('AIQA: Creating experiment');
-		const experiment = await this.requestJson<Experiment>(`/experiment`, 'POST', experimentSetup);
+		});
 		this.experimentId = experiment.id;
 		this.experiment = experiment;
 		return experiment;
 	}
 
-	/**
-	 * Ask the server to score an example result. Stores the score for later summary calculation.
-	 */
-	async scoreAndStore(example: Example, result: any, scores: Record<string, number> = {}): Promise<ScoreResult> {
-		// Do we have an experiment ID? If not, we need to create the experiment first
-		if (!this.experimentId) {
-			await this.createExperiment();
+	/** The experiment: fetched if an `experimentId` was given, else created on first use. */
+	private ensureExperiment(): Promise<Experiment> {
+		if (this.experiment) {
+			return Promise.resolve(this.experiment);
 		}
-		console.log('AIQA: Scoring and storing example:', example.id);
-		console.log('AIQA: Scores:', scores);
-		const jsonResult = await this.requestJson<any>(
+		if (!this.pendingExperiment) {
+			const pending = this.experimentId
+				? this.request<Experiment>(`/experiment/${this.experimentId}`).then(experiment => (this.experiment = experiment))
+				: this.createExperiment();
+			this.pendingExperiment = pending.finally(() => {
+				this.pendingExperiment = undefined;
+			});
+		}
+		return this.pendingExperiment;
+	}
+
+	/**
+	 * Ask the server to score an example result, and store it in the experiment.
+	 * @param run.trace - the trace of this run, so the server can add its token count and cost
+	 * @param run.parameters - the parameters it ran with; the server keeps one result per (example, parameters)
+	 */
+	async scoreAndStore(example: Example, output: any, scores: Record<string, number> = {},
+		run: { trace?: string; parameters?: Record<string, any> } = {}): Promise<ScoreResult> {
+		if (!this.experimentId) {
+			await this.ensureExperiment();
+		}
+		console.log('AIQA: Scoring and storing example:', example.id, 'with scores:', scores);
+		const result = await this.request<ScoreResult>(
 			`/experiment/${this.experimentId}/example/${example.id}/scoreAndStore`,
 			'POST',
-			{
-				output: result,
-				trace: example.trace,
-				scores
-			}
+			{ output, trace: run.trace, scores, parameters: run.parameters }
 		);
-		console.log('AIQA: scoreAndStore response:', jsonResult);
-		return jsonResult;
+		console.log('AIQA: scoreAndStore response:', result);
+		return result;
 	}
 
 	/**
 	 * Run an engine function on all examples and score the results
 	 */
-	async run(engine: (input: any) => any | Promise<any>,
-		scorer?: (output: any, example: Example) => Promise<Record<string, number>>): Promise<void> {
+	async run(engine: Engine, scorer?: Scorer): Promise<void> {
 		const examples = await this.getExampleInputs();
 		let nextIndex = 0;
 		const worker = async () => {
 			while (nextIndex < examples.length) {
-				const index = nextIndex++;
-				const example = examples[index];
+				const example = examples[nextIndex++];
 				try {
-					const result = await this.runExample(example, engine, scorer);
-					if (result) {
-						this.scores.push({
-							example,
-							result,
-							scores: result,
-						});
-					}
+					await this.runExample(example, engine, scorer);
 				} catch (error) {
 					console.error(`AIQA: Error processing example ${example?.id || 'unknown'}:`, error);
 				}
 			}
 		};
-		const workers = Array.from({ length: Math.min(this.parallelism, examples.length || 1) }, () => worker());
-		for (const running of workers) {
-			await running;
-		}
+		await Promise.all(Array.from({ length: Math.min(this.parallelism, examples.length || 1) }, worker));
 	}
 
 	/**
 	 * Run the engine on an example with the experiment's parameters, score the result, and store it.
+	 * The engine runs in its own trace, which is linked to the result.
 	 */
-	async runExample(example: Example,
-		callMyCode: (input: any, parameters: Record<string, any>) => any | Promise<any>,
-		scoreThisOutput: (output: any, example: Example, parameters: Record<string, any>) => Promise<Record<string, number>>): Promise<ScoreResult | null> {
-		if (!this.experiment) {
-			await this.createExperiment();
-		}
-		if (!this.experiment) {
-			throw new Error('Failed to create experiment');
-		}
-		const parametersHere = this.experiment.parameters || {};
+	async runExample(example: Example, callMyCode: Engine, scoreThisOutput?: Scorer): Promise<ScoreResult> {
+		const experiment = await this.ensureExperiment();
+		const parametersHere = experiment.parameters || {};
 		const input = example.input || (example.spans && example.spans.length > 0 ? example.spans[0].attributes?.input : undefined);
 		if (!input) {
 			console.warn('AIQA: Example has no input field or spans with input attribute:', example);
@@ -215,18 +196,31 @@ export class ExperimentRunner {
 				}
 			}
 		}
-		const start = Date.now();
 		try {
-			const pOutput = callMyCode(input, parametersHere);
-			const output = pOutput instanceof Promise ? await pOutput : pOutput;
-			console.log('AIQA: Output:', output);
+			// A root span, so the server can find this run's trace (by parent:unset) and
+			// add its token count and cost to the result.
+			const span = startSpan(callMyCode.name || 'run_example', {
+				parent: null,
+				attributes: { [AIQA_EXPERIMENT_ID]: this.experimentId, [AIQA_EXAMPLE_ID]: example.id, input },
+			});
+			const traceId = span.isRecording() ? getTraceId(span) : undefined;
+			const start = Date.now();
+			let output: any;
+			try {
+				output = await context.with(trace.setSpan(context.active(), span), () => callMyCode(input, parametersHere));
+				setSpanAttribute('output', output, span);
+			} catch (error) {
+				span.recordException(error instanceof Error ? error : new Error(String(error)));
+				span.setStatus({ code: SpanStatusCode.ERROR });
+				throw error;
+			} finally {
+				span.end();
+			}
 			const duration = Date.now() - start;
-			let scores: Record<string, number> = scoreThisOutput ? await scoreThisOutput(output, example, parametersHere) : {};
+			await flushSpans();
+			const scores: Record<string, number> = scoreThisOutput ? await scoreThisOutput(output, example, parametersHere) : {};
 			scores['duration'] = duration;
-			console.log('AIQA: Call scoreAndStore ... for example:', example.id, 'with scores:', scores);
-			const result = await this.scoreAndStore(example, output, scores);
-			console.log('AIQA: scoreAndStore returned:', result);
-			return result;
+			return await this.scoreAndStore(example, output, scores, { trace: traceId, parameters: parametersHere });
 		} finally {
 			if (setEnv) {
 				const env = (globalThis as any).process.env;
@@ -242,8 +236,10 @@ export class ExperimentRunner {
 	}
 
 	async getSummaryResults(): Promise<Record<string, MetricStats>> {
-		const experiment2 = await this.requestJson<Experiment>(`/experiment/${this.experimentId}`, 'GET');
-		return experiment2.summaries || {};
+		if (!this.experimentId) {
+			throw new Error('No experiment yet: create or run one first');
+		}
+		const experiment = await this.request<Experiment>(`/experiment/${this.experimentId}`);
+		return experiment.summaries || {};
 	}
 }
-

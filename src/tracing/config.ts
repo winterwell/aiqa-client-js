@@ -75,16 +75,6 @@ export function setConfigOverrides(options: InitTracingOptions): void {
 	overrides = next;
 }
 
-/** The programmatic overrides only, for tests and for diffing across re-inits. */
-export function getConfigOverrides(): InitTracingOptions {
-	return { ...overrides };
-}
-
-/** Drop all programmatic config, so the environment is authoritative again. */
-export function clearConfigOverrides(): void {
-	overrides = {};
-}
-
 /** The effective config: programmatic values, else environment, else defaults. */
 export function getConfig(): AIQAConfig {
 	const envSamplingRate = normalizeSamplingRate(getEnvVar('AIQA_SAMPLING_RATE'));

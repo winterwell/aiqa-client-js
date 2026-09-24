@@ -1,4 +1,5 @@
-function isAttributeSet(span: any, attributeName: string): boolean {
+/** True if a recording span already has `attributeName`, so we do not overwrite it. */
+export function isAttributeSet(span: any, attributeName: string): boolean {
 	try {
 		if (!span || !span.isRecording || !span.isRecording()) {
 			return false;

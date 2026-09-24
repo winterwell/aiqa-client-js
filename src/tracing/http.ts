@@ -10,14 +10,33 @@ function resolveServerUrl(serverUrl?: string): string {
 
 function buildApiHeaders(apiKey?: string): Record<string, string> {
 	const key = apiKey || getConfig().apiKey;
-	const headers: Record<string, string> = {
-		'Content-Type': 'application/json',
-		'Accept-Encoding': 'gzip, deflate, br',
-	};
+	const headers: Record<string, string> = { 'Content-Type': 'application/json' };
 	if (key) {
 		headers['Authorization'] = `Bearer ${key}`;
 	}
 	return headers;
+}
+
+/**
+ * Call an AIQA server endpoint and parse the JSON reply, throwing on a non-2xx status.
+ * `serverUrl` and `apiKey` default to the client config.
+ */
+export async function requestJson<T = any>(
+	path: string,
+	options: { method?: 'GET' | 'POST'; body?: any; serverUrl?: string; apiKey?: string; what?: string } = {},
+): Promise<T> {
+	const method = options.method || 'GET';
+	const response = await fetch(`${resolveServerUrl(options.serverUrl)}${path}`, {
+		method,
+		headers: buildApiHeaders(options.apiKey),
+		body: options.body == null ? undefined : JSON.stringify(options.body),
+	});
+	if (!response.ok) {
+		const errorText = await response.text().catch(() => 'Unknown error');
+		const what = options.what || `${method} ${path}`;
+		throw new Error(`Failed to ${what}: ${response.status} ${response.statusText} - ${errorText}`);
+	}
+	return await response.json() as T;
 }
 
 export async function getSpan(spanId: string, organisationId?: string): Promise<any | undefined> {
@@ -27,7 +46,8 @@ export async function getSpan(spanId: string, organisationId?: string): Promise<
 		console.warn('AIQA: AIQA_SERVER_URL is not set. Cannot retrieve span.');
 		return undefined;
 	}
-	const queryParams = new URLSearchParams({ q: `id:${spanId}` });
+	// fields=* because the search route leaves out attributes (input, output...) by default.
+	const queryParams = new URLSearchParams({ q: `id:${spanId}`, fields: '*' });
 	if (orgId) {
 		queryParams.set('organisation', orgId);
 	}
@@ -67,21 +87,9 @@ export async function submitFeedback(traceId: string, feedback: { thumbsUp?: boo
 }
 
 export async function getOrganisation(organisationId: string, serverUrl?: string, apiKey?: string): Promise<any> {
-	const url = resolveServerUrl(serverUrl);
-	const response = await fetch(`${url}/organisation/${organisationId}`, { method: 'GET', headers: buildApiHeaders(apiKey) });
-	if (!response.ok) {
-		const errorText = await response.text().catch(() => 'Unknown error');
-		throw new Error(`Failed to get organisation: ${response.status} ${response.statusText} - ${errorText}`);
-	}
-	return await response.json();
+	return requestJson(`/organisation/${encodeURIComponent(organisationId)}`, { serverUrl, apiKey, what: 'get organisation' });
 }
 
 export async function getAPIKeyInfo(apiKeyId: string, serverUrl?: string, apiKey?: string): Promise<any> {
-	const url = resolveServerUrl(serverUrl);
-	const response = await fetch(`${url}/api-key/${apiKeyId}`, { method: 'GET', headers: buildApiHeaders(apiKey) });
-	if (!response.ok) {
-		const errorText = await response.text().catch(() => 'Unknown error');
-		throw new Error(`Failed to get api key info: ${response.status} ${response.statusText} - ${errorText}`);
-	}
-	return await response.json();
+	return requestJson(`/api-key/${encodeURIComponent(apiKeyId)}`, { serverUrl, apiKey, what: 'get api key info' });
 }

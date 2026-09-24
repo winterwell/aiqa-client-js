@@ -249,10 +249,13 @@ export async function shutdownTracing(): Promise<void> {
 	ownsProvider = false;
 	tracingEnabled = false;
 	if (owned && oldProvider) {
-		await oldProvider.shutdown();
-		unregisterGlobals();
-	}
-	if (oldExporter) {
+		// shutdown() drains the batch processor, which flushes and shuts down the exporter.
+		try {
+			await oldProvider.shutdown();
+		} finally {
+			unregisterGlobals();
+		}
+	} else if (oldExporter) {
 		await oldExporter.shutdown();
 	}
 }

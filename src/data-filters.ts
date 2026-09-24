@@ -1,6 +1,6 @@
 /**
  * Data filtering utilities for removing sensitive information from spans.
- * Shared by tracing.ts and aiqa-exporter.ts to avoid code duplication.
+ * Used for span attributes (tracing/span-helpers.ts, tracing/spans.ts) and again by the exporter.
  */
 
 import { getEnvVar } from './env';
@@ -11,9 +11,6 @@ import { getEnvVar } from './env';
  */
 export function getEnabledFilters(): Set<string> {
 	const filtersEnv = getEnvVar('AIQA_DATA_FILTERS') || "RemovePasswords, RemoveJWT, RemoveAuthHeaders, RemoveAPIKeys";
-	if (!filtersEnv) {
-		return new Set();
-	}
 	return new Set(filtersEnv.split(',').map(f => f.trim()).filter(f => f));
 }
 
@@ -108,6 +105,19 @@ export function filterDataRecursive(data: any): any {
 function filterDataRecursiveInner(data: any, seen: WeakSet<object>, enabledFilters: Set<string>): any {
 	if (data == null) {
 		return data;
+	}
+
+	if (typeof data === 'object' && typeof data.toJSON === 'function') {
+		// A Date (or anything else with toJSON) has no own enumerable fields, so walking it
+		// would record `{}`. Use its JSON form, as JSON.stringify would.
+		try {
+			data = data.toJSON();
+		} catch (_e) {
+			return String(data);
+		}
+		if (data == null) {
+			return data;
+		}
 	}
 
 	if (typeof data === 'object') {

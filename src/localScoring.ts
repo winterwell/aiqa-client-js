@@ -7,9 +7,9 @@ import Example from './common/types/Example';
 async function scoreMetricJavascript(metric: Metric, output: any, example: Example): Promise<number> {
 	return new Promise<number>((resolve, reject) => {
 		try {
-			const functionBody = metric.parameters?.code || metric.parameters?.script;
+			const functionBody = metric.code || metric.parameters?.code || metric.parameters?.script;
 			if (!functionBody) {
-				return reject(new Error(`No script or code found in metric.parameters for metric "${metric.name}"`));
+				return reject(new Error(`No script or code found in metric.code or metric.parameters for metric "${metric.name}"`));
 			}
 
 			let finished = false;
@@ -19,13 +19,14 @@ async function scoreMetricJavascript(metric: Metric, output: any, example: Examp
 			// Prepare our function
 			let userFn: any;
 			try {
-				// block all IO and other dangerous functions for security
+				// Shadow the obvious IO globals. This is a guard against accidents, not a
+				// sandbox: only run metric code you trust. (`eval` cannot be shadowed - in
+				// strict mode `const eval` is a SyntaxError, which failed every script.)
 				userFn = new AsyncFunction('output', 'example', `
 					"use strict";
 					const global = undefined;
 					const require = undefined;
 					const process = undefined;
-					const eval = undefined;
 					const Function = undefined;
 					const setTimeout = undefined;
 					const setInterval = undefined;
@@ -105,12 +106,12 @@ export async function scoreMetric(
 
 /**
  * Score all metrics from a dataset locally.
- * Returns a record of metric names to scores.
+ * Returns a record of metric ids (or names, where a metric has no id) to scores.
  * 
  * @param metrics - Array of metrics to score
  * @param output - The output to score
  * @param example - The example (for context)
- * @returns Record of metric names to scores
+ * @returns Record of metric ids to scores
  */
 export async function scoreAllMetrics(
 	metrics: Metric[],
@@ -121,11 +122,12 @@ export async function scoreAllMetrics(
 	
 	for (const metric of metrics) {
 		try {
-			scores[metric.name] = await scoreMetric(metric, output, example);
+			// Keyed by id, as the server and webapp key scores (falling back to name).
+			scores[metric.id || metric.name] = await scoreMetric(metric, output, example);
 		} catch (err: any) {
 			// Only log warnings for metrics that can't be scored locally (LLM, number, etc.)
 			// This is expected behavior, so we don't fail the test
-			const errorMsg = err?.message || err;
+			const errorMsg = String(err?.message ?? err);
 			if (errorMsg.includes('cannot be scored locally') || 
 			    errorMsg.includes('not yet implemented') ||
 			    errorMsg.includes('has no type field') ||

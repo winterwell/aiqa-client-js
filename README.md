@@ -37,6 +37,7 @@ Set these in the environment, or in a `.env` file in your project root (see
 | `AIQA_COMPONENT_TAG` | Optional tag on all spans, e.g. `mynamespace.mysystem`, for filtering in the Traces view. |
 | `AIQA_SAMPLING_RATE` | Fraction of traces to sample, `0`-`1`. Defaults to `1`. |
 | `OTEL_SERVICE_NAME` | Service name reported on spans. Falls back to `AIQA_SERVICE_NAME`, then `aiqa-client`. |
+| `AIQA_DATA_FILTERS` | Redaction filters for span data. Defaults to `RemovePasswords, RemoveJWT, RemoveAuthHeaders, RemoveAPIKeys`. |
 
 Tracing initialises lazily on first use, so importing the package is cheap and safe.
 
@@ -80,9 +81,14 @@ const fetchAnswer = withTracingAsync(async function fetchAnswer(prompt: string) 
 await flushSpans();
 ```
 
-Streaming results are handled: if a wrapped function returns an iterable or async
-iterable, the span stays open until the stream is exhausted, and
-`gen_ai.server.time_to_first_output_token` is recorded when the first chunk is emitted.
+`withTracing` also works on async functions: if the function returns a promise, the span
+ends when it settles. `withTracingAsync` is the same, except the wrapped function always
+returns a promise.
+
+Streaming results are handled: if a wrapped function returns a generator or async
+iterable, the span stays open until the stream is exhausted (or abandoned with `break`),
+and `gen_ai.server.time_to_first_output_token` is recorded when the first chunk is
+emitted. Arrays, strings and other plain iterables are returned unchanged.
 
 Inputs and outputs are recorded as JSON when they are not something OpenTelemetry can
 store directly, and the data filters (`AIQA_DATA_FILTERS`) run over them first, so
@@ -229,14 +235,23 @@ Run a dataset of examples through your code and score the outputs:
 import { ExperimentRunner } from 'aiqa-client';
 
 const runner = new ExperimentRunner({ datasetId: 'my-dataset', parallelism: 4 });
-await runner.createExperiment();
+await runner.createExperiment({ name: 'my first experiment', parameters: { temperature: 0.2 } });
 
-for (const example of await runner.getExampleInputs()) {
-  await runner.runExample(example, async (output, ex, parameters) => scoreIt(output, ex));
-}
+// Engine: (input, parameters) => output. Optional scorer: (output, example, parameters) => scores.
+await runner.run(
+  async (input, parameters) => myCode(input, parameters),
+  async (output, example) => ({ my_metric: scoreIt(output, example) }),
+);
+// or one at a time: await runner.runExample(example, engine, scorer)
 
 console.log(await runner.getSummaryResults());
 ```
+
+Each example runs in its own trace, which is linked to its result so the server can add
+token counts and cost. Scores are keyed by metric id; `scoreAllMetrics(dataset.metrics,
+output, example)` scores the dataset's `javascript` metrics locally, and the server
+scores the rest. Without a `createExperiment` call, one is created on first use; pass
+`experimentId` to add results to an existing experiment instead.
 
 `parallelism` controls how many examples run concurrently (default 1). By default the
 runner does not mutate process-wide env vars while running examples; opt in with

@@ -2,6 +2,39 @@
 
 ## Pending version
 
+- Fixed: `withTracing` wrapped any iterable result as a stream, so a traced function
+  returning an array, string, Map or Set handed back a bare iterator instead. Only
+  generators and async iterables are now treated as streams; everything else is returned
+  unchanged.
+- Fixed: a traced stream abandoned early (`break` out of `for`/`for await`) never ended
+  its span, so it was never sent. The wrapper now implements `return()`.
+- Fixed: `withTracing` on an async function ended the span immediately and recorded the
+  promise (`{}`) as the output. It now waits for the promise; `withTracingAsync` is
+  unchanged. Both share one implementation.
+- Fixed: local `javascript` metric scoring failed for every script, with a SyntaxError
+  from the sandbox preamble (`const eval` is illegal in strict mode). Scripts are now
+  also read from `metric.code`, where the webapp puts them, as well as `metric.parameters`.
+- Fixed: `scoreAllMetrics` keyed scores by metric name; the server matches by metric id
+  (falling back to name), so local scores were ignored and re-scored server-side.
+- Fixed: `ExperimentRunner` sent the example's *source* trace to `scoreAndStore`, so the
+  server attributed that trace's tokens and cost to the run and wrote metric attributes
+  onto it. Each example now runs in its own root span (tagged `aiqa.experiment` /
+  `aiqa.example`) whose trace id is sent, along with the run's `parameters`, as the
+  Python client does. `scoreAndStore` takes an optional
+  `{ trace, parameters }` fourth argument.
+- Fixed: `ExperimentRunner` with `parallelism > 1` could create one experiment per worker,
+  and an `experimentId` passed to the constructor was ignored by `runExample`, which
+  created a new experiment anyway. The experiment is now fetched (or created) once.
+- Fixed: the exporter's flush lock let two concurrent flushes run at once, and on a failed
+  batch it re-buffered the remaining batches *and* sent them, duplicating spans, while
+  leaking the failed batch's dedup keys. Flushes now queue, and failed batches are dropped
+  (and logged). A single large `export()` could also overshoot the 10,000-span buffer cap.
+- Fixed: a `Date` (or anything with `toJSON`) in traced data was recorded as `{}`.
+- Fixed: `getSpan` returned spans without their attributes (input, output...), which the
+  server's search route leaves out unless asked.
+- Changed: `withTracing` / `withTracingAsync` are typed as returning a function rather than
+  `Function | ...`.
+
 - Fixed: no spans reached the server at all. They were posted to `POST /span`, which the
   AIQA server dropped in January 2026 in favour of the OTLP endpoint (`POST /v1/traces`),
   so every flush 404'd - logged by the exporter, but not raised, leaving a configured
